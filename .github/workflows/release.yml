@@ -20,7 +20,7 @@ permissions:
 
 concurrency:
   group: backend-release-${{ github.ref }}
-  cancel-in-progress: ${{ github.ref == 'refs/heads/main' }}
+  cancel-in-progress: false
 
 jobs:
   verify-go:
@@ -163,7 +163,7 @@ jobs:
 
   publish-release:
     name: Publish GitHub Release
-    if: github.ref_type == 'tag'
+    if: github.ref_type == 'tag' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
     needs: build-backend
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -172,16 +172,61 @@ jobs:
       contents: write
 
     steps:
+      - name: Check out target commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+
       - name: Download backend artifacts
         uses: actions/download-artifact@v4
         with:
           name: backend-artifacts-${{ github.sha }}
           path: dist
 
+      - name: Resolve release tag
+        id: release
+        shell: bash
+        run: |
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+            echo "create_tag=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          git fetch --tags --force
+          latest="$(git tag -l 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname | head -n 1)"
+          if [ -z "$latest" ]; then
+            next="v0.1.0"
+          elif [[ "$latest" =~ ^v([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+            major="${BASH_REMATCH[1]}"
+            minor="${BASH_REMATCH[2]}"
+            patch="${BASH_REMATCH[3]}"
+            next="v${major}.${minor}.$((patch + 1))"
+          else
+            printf 'Latest release tag %s is not a vMAJOR.MINOR.PATCH tag\n' "$latest"
+            exit 1
+          fi
+
+          echo "tag=${next}" >> "$GITHUB_OUTPUT"
+          echo "create_tag=true" >> "$GITHUB_OUTPUT"
+
+      - name: Create release tag
+        if: steps.release.outputs.create_tag == 'true'
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "$RELEASE_TAG" "$GITHUB_SHA" -m "$RELEASE_TAG"
+          git push origin "refs/tags/$RELEASE_TAG"
+
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
         run: |
-          gh release create "${GITHUB_REF_NAME}" dist/* \
+          gh release create "$RELEASE_TAG" dist/* \
             --verify-tag \
             --generate-notes
