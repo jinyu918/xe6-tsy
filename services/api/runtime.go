@@ -196,6 +196,7 @@ func newConfiguredRuntime(ctx context.Context, processConfig config.Config) (*co
 	var fallbackWorker *delivery.AutomaticTurnFallbackWorker
 	if fallbackPlayer != nil {
 		deliveryService.ConfigureAutomaticFallback(fallbackPlayer)
+		deliveryService.ConfigureAutomaticOutputRestorer(languageOutputRestorer{service: languageDependencies.service})
 		fallbackWorker = delivery.NewAutomaticTurnFallbackWorker(deliveryService, time.Second)
 	}
 
