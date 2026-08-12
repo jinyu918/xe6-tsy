@@ -33,16 +33,18 @@ func TestTurnWriterStoresAndReplaysFinalTurn(t *testing.T) {
 	var (
 		count                 int
 		languageConfigVersion int64
+		asrProfileID          *string
+		ttsProfileID          *string
 		createdAt             time.Time
 	)
 	if err := pool.QueryRow(t.Context(), `
-SELECT COUNT(*), MAX(language_config_version), MAX(created_at)
+SELECT COUNT(*), MAX(language_config_version), MAX(asr_profile_id), MAX(tts_profile_id), MAX(created_at)
 FROM voice_turns
-WHERE id = $1`, event.TurnID).Scan(&count, &languageConfigVersion, &createdAt); err != nil {
+WHERE id = $1`, event.TurnID).Scan(&count, &languageConfigVersion, &asrProfileID, &ttsProfileID, &createdAt); err != nil {
 		t.Fatalf("read stored final turn: %v", err)
 	}
-	if count != 1 || languageConfigVersion != event.LanguageConfigVersion || !createdAt.Equal(event.OccurredAt) {
-		t.Fatalf("stored final turn count=%d version=%d created_at=%v", count, languageConfigVersion, createdAt)
+	if count != 1 || languageConfigVersion != event.LanguageConfigVersion || !sameStringPointer(asrProfileID, event.ASRProfileID) || !sameStringPointer(ttsProfileID, event.TTSProfileID) || !createdAt.Equal(event.OccurredAt) {
+		t.Fatalf("stored final turn count=%d version=%d asr_profile_id=%v tts_profile_id=%v created_at=%v", count, languageConfigVersion, asrProfileID, ttsProfileID, createdAt)
 	}
 }
 
@@ -258,6 +260,8 @@ func finalTurnEvent(eventID, turnID, sessionID string, sequenceNo int64) records
 	participantID := "participant_01"
 	label := "Speaker One"
 	confidence := 0.91
+	asrProfileID := "asr_profile_01"
+	ttsProfileID := "tts_profile_01"
 	return recordsv1.FinalTurnEvent{
 		EventVersion:          recordsv1.FinalTurnEventVersion,
 		EventID:               eventID,
@@ -269,6 +273,8 @@ func finalTurnEvent(eventID, turnID, sessionID string, sequenceNo int64) records
 		SourceLanguage:        "en-US",
 		TargetLanguage:        "zh-CN",
 		LanguageConfigVersion: 3,
+		ASRProfileID:          &asrProfileID,
+		TTSProfileID:          &ttsProfileID,
 		SourceText:            "Hello",
 		TranslatedText:        "Ni hao",
 		SpeakerCode:           "speaker_01",
@@ -279,4 +285,11 @@ func finalTurnEvent(eventID, turnID, sessionID string, sequenceNo int64) records
 		EndedAt:               startedAt.Add(2 * time.Second),
 		OccurredAt:            startedAt.Add(3 * time.Second),
 	}
+}
+
+func sameStringPointer(left, right *string) bool {
+	if left == nil || right == nil {
+		return left == right
+	}
+	return *left == *right
 }

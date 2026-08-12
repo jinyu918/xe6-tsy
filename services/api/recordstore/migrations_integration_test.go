@@ -60,6 +60,7 @@ func TestMigrateRecordsSchema(t *testing.T) {
 		{26, "target_level_message_preferences"},
 		{27, "assistant_llm_usage"},
 		{28, "realtime_mode_projection"},
+		{29, "final_turn_speech_profiles"},
 	}
 	if len(statuses) != len(want) {
 		t.Fatalf("len(AppliedMigrations()) = %d, want %d", len(statuses), len(want))
@@ -412,6 +413,12 @@ func testTurnConstraints(t *testing.T, pool *pgxpool.Pool) {
 	}
 	if _, err := pool.Exec(t.Context(), "UPDATE voice_turns SET source_text = 'edited' WHERE id = 'turn_01'"); err == nil {
 		t.Fatal("updating source_text after snapshot update succeeded, want an error")
+	}
+	if _, err := pool.Exec(t.Context(), "UPDATE voice_turns SET asr_profile_id = 'asr_profile_02' WHERE id = 'turn_01'"); err == nil {
+		t.Fatal("updating immutable asr_profile_id succeeded, want an error")
+	}
+	if _, err := pool.Exec(t.Context(), "UPDATE voice_turns SET tts_profile_id = 'tts_profile_02' WHERE id = 'turn_01'"); err == nil {
+		t.Fatal("updating immutable tts_profile_id succeeded, want an error")
 	}
 }
 
