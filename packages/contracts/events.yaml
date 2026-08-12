@@ -24,6 +24,11 @@ channels:
     messages:
       assistantReply:
         $ref: '#/components/messages/AssistantReply'
+  languageConfigChanged:
+    address: language.config.changed
+    messages:
+      languageConfigChanged:
+        $ref: '#/components/messages/LanguageConfigChanged'
   controlDataChannel:
     address: lingow-control-v1
     description: Reliable ordered WebRTC DataChannel bound to the authenticated PeerConnection session.
@@ -55,6 +60,14 @@ operations:
     action: send
     channel:
       $ref: '#/channels/assistantReply'
+  sendLanguageConfigChanged:
+    action: send
+    channel:
+      $ref: '#/channels/languageConfigChanged'
+  consumeLanguageConfigChanged:
+    action: receive
+    channel:
+      $ref: '#/channels/languageConfigChanged'
   receiveControlModeSwitch:
     action: receive
     channel: { $ref: '#/channels/controlDataChannel' }
@@ -91,6 +104,13 @@ components:
       contentType: application/json
       payload:
         $ref: '#/components/schemas/AssistantReplyEvent'
+    LanguageConfigChanged:
+      name: language.config.changed
+      title: Language configuration changed
+      summary: A durable configuration snapshot that realtime uses to prepare the next session speech binding.
+      contentType: application/json
+      payload:
+        $ref: '#/components/schemas/LanguageConfigChangedEvent'
     ControlModeSwitchRequest:
       name: mode.switch
       summary: Switches the runtime mode without replacing the authenticated PeerConnection.
@@ -230,6 +250,39 @@ components:
         generation: { type: integer, format: int64, minimum: 1 }
         text: { type: string, minLength: 1 }
         language: { type: string, minLength: 1 }
+        occurred_at: { type: string, format: date-time }
+    LanguageConfigChangedEvent:
+      type: object
+      additionalProperties: false
+      description: The authoritative active language configuration snapshot for one session. Consumers deduplicate by event_id and must not let an older language_config_version replace a newer session binding.
+      required: [event_version, event_id, trace_id, session_id, language_config_version, language_pairs, output_routes, occurred_at]
+      properties:
+        event_version: { type: integer, const: 1, description: Payload schema version. }
+        event_id: { type: string, minLength: 1, description: Durable event idempotency key. }
+        trace_id: { type: string, minLength: 1 }
+        session_id: { type: string, minLength: 1 }
+        language_config_version: { type: integer, format: int64, minimum: 1 }
+        language_pairs:
+          type: array
+          minItems: 1
+          items:
+            type: object
+            additionalProperties: false
+            required: [source, target]
+            properties:
+              source: { type: string, minLength: 1 }
+              target: { type: string, minLength: 1 }
+        output_routes:
+          type: array
+          minItems: 1
+          items:
+            type: object
+            additionalProperties: false
+            required: [target_language, tts_enabled, delivery_enabled]
+            properties:
+              target_language: { type: string, minLength: 1 }
+              tts_enabled: { type: boolean }
+              delivery_enabled: { type: boolean }
         occurred_at: { type: string, format: date-time }
     FinalTurnEvent:
       type: object
