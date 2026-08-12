@@ -378,7 +378,7 @@ func TestManagerPlaysFallbackThroughActiveSession(t *testing.T) {
 
 	err = manager.PlayFallback(t.Context(), realtimev1.FallbackPlaybackRequest{
 		OperationID: "fallback-1", SessionID: "session-1", TurnID: "turn-1", TargetLanguage: "zh-CN",
-		TranslatedText: "fallback text", LanguageConfigVersion: 3, TraceID: "trace-fallback",
+		TranslatedText: "fallback text", LanguageConfigVersion: 3, TTSProfileID: "tts_profile_01", TraceID: "trace-fallback",
 	})
 	if err != nil {
 		t.Fatalf("PlayFallback() error = %v", err)
@@ -391,7 +391,7 @@ func TestManagerPlaysFallbackThroughActiveSession(t *testing.T) {
 func TestManagerPlayFallbackRejectsCanceledOrUnknownSession(t *testing.T) {
 	request := realtimev1.FallbackPlaybackRequest{
 		OperationID: "fallback-1", SessionID: "session-1", TurnID: "turn-1", TargetLanguage: "zh-CN",
-		TranslatedText: "fallback text", LanguageConfigVersion: 3, TraceID: "trace-fallback",
+		TranslatedText: "fallback text", LanguageConfigVersion: 3, TTSProfileID: "tts_profile_01", TraceID: "trace-fallback",
 	}
 	var nilManager *Manager
 	if err := nilManager.PlayFallback(t.Context(), request); !errors.Is(err, ErrDependencyRequired) {

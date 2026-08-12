@@ -53,7 +53,7 @@ func TestAutomaticPostgresReadQueriesKeepLegacyNullTTSProfileUnknown(t *testing.
 	pool := &automaticPostgresPoolFake{
 		rows: []*automaticRowsFake{
 			{rows: [][]any{runValues}},
-			{rows: [][]any{runValues}},
+			{},
 			{rows: [][]any{runValues}},
 		},
 		row: []*automaticRowFake{{values: runValues}},
@@ -65,15 +65,18 @@ func TestAutomaticPostgresReadQueriesKeepLegacyNullTTSProfileUnknown(t *testing.
 	if got, err := repository.ListAutomaticTurnRetryCandidates(t.Context(), 5); err != nil || len(got) != 1 || got[0].TTSProfileID != nil {
 		t.Fatalf("ListAutomaticTurnRetryCandidates() = %#v, %v; want nil profile", got, err)
 	}
-	if got, err := repository.ListAutomaticTurnRecoveryCandidates(t.Context(), 5); err != nil || len(got) != 1 || got[0].TTSProfileID != nil {
-		t.Fatalf("ListAutomaticTurnRecoveryCandidates() = %#v, %v; want nil profile", got, err)
+	if got, err := repository.ListAutomaticTurnRecoveryCandidates(t.Context(), 5); err != nil || len(got) != 0 {
+		t.Fatalf("ListAutomaticTurnRecoveryCandidates() = %#v, %v; want no legacy recovery candidate", got, err)
+	}
+	if len(pool.queries) < 2 || !strings.Contains(pool.queries[1], "NULLIF(BTRIM(tts_profile_id), '') IS NOT NULL") {
+		t.Fatalf("recovery candidate query = %#v, want non-empty TTS profile filter", pool.queries)
 	}
 	if got, err := repository.ListAutomaticTurnRestoreCandidates(t.Context(), 5); err != nil || len(got) != 1 || got[0].TTSProfileID != nil {
 		t.Fatalf("ListAutomaticTurnRestoreCandidates() = %#v, %v; want nil profile", got, err)
 	}
 	claimPool := &automaticPostgresPoolFake{tx: &automaticTxFake{row: []*automaticRowFake{{values: runValues}}}}
-	if got, _, err := (&PostgresRepository{pool: claimPool}).ClaimAutomaticTurnFallback(t.Context(), "account-1", "turn-1"); err != nil || got.TTSProfileID != nil {
-		t.Fatalf("ClaimAutomaticTurnFallback() = %#v, %v; want nil profile", got, err)
+	if _, _, err := (&PostgresRepository{pool: claimPool}).ClaimAutomaticTurnFallback(t.Context(), "account-1", "turn-1"); !errors.Is(err, domain.ErrConflict) {
+		t.Fatalf("ClaimAutomaticTurnFallback() error = %v, want conflict for legacy profile", err)
 	}
 }
 

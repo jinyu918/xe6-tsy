@@ -66,7 +66,7 @@ func TestHandlerAcceptsFallbackPlaybackIdempotently(t *testing.T) {
 	fixture := newFixture(t)
 	fallback := &fallbackPlaybackFake{}
 	fixture.controlHandler.fallback = fallback
-	body := `{"operation_id":"fallback-1","session_id":"session-1","turn_id":"turn-1","target_language":"zh-CN","translated_text":"translated","language_config_version":3,"trace_id":"trace-1"}`
+	body := `{"operation_id":"fallback-1","session_id":"session-1","turn_id":"turn-1","target_language":"zh-CN","translated_text":"translated","language_config_version":3,"tts_profile_id":"tts_profile_01","trace_id":"trace-1"}`
 
 	first := fixture.request(http.MethodPost, "/realtime/v1/sessions/session-1/fallback-playback", body, "fallback:fallback-1")
 	second := fixture.request(http.MethodPost, "/realtime/v1/sessions/session-1/fallback-playback", body, "fallback:fallback-1")
@@ -94,7 +94,7 @@ func TestHandlerKeepsFallbackPlaybackIdempotentAcrossInstances(t *testing.T) {
 	firstFallback := &fallbackPlaybackFake{}
 	firstFixture.controlHandler.fallback = firstFallback
 	firstFixture.controlHandler.fallbackReplays = store
-	body := `{"operation_id":"fallback-1","session_id":"session-1","turn_id":"turn-1","target_language":"zh-CN","translated_text":"translated","language_config_version":3,"trace_id":"trace-1"}`
+	body := `{"operation_id":"fallback-1","session_id":"session-1","turn_id":"turn-1","target_language":"zh-CN","translated_text":"translated","language_config_version":3,"tts_profile_id":"tts_profile_01","trace_id":"trace-1"}`
 
 	first := firstFixture.request(http.MethodPost, "/realtime/v1/sessions/session-1/fallback-playback", body, "fallback:fallback-1")
 	secondFixture := newFixture(t)
@@ -124,7 +124,7 @@ func TestHandlerClaimsFallbackBeforeConcurrentCrossInstancePlayback(t *testing.T
 	firstFallback := &blockingFallbackPlaybackFake{entered: make(chan struct{}), release: make(chan struct{})}
 	firstFixture.controlHandler.fallback = firstFallback
 	firstFixture.controlHandler.fallbackReplays = store
-	body := `{"operation_id":"fallback-1","session_id":"session-1","turn_id":"turn-1","target_language":"zh-CN","translated_text":"translated","language_config_version":3,"trace_id":"trace-1"}`
+	body := `{"operation_id":"fallback-1","session_id":"session-1","turn_id":"turn-1","target_language":"zh-CN","translated_text":"translated","language_config_version":3,"tts_profile_id":"tts_profile_01","trace_id":"trace-1"}`
 	firstDone := make(chan *httptest.ResponseRecorder, 1)
 	go func() {
 		firstDone <- firstFixture.request(http.MethodPost, "/realtime/v1/sessions/session-1/fallback-playback", body, "fallback:fallback-1")
@@ -159,7 +159,7 @@ func TestHandlerRenewsActiveFallbackClaim(t *testing.T) {
 	firstFallback := &blockingFallbackPlaybackFake{entered: make(chan struct{}), release: make(chan struct{})}
 	fixture.controlHandler.fallback = firstFallback
 	fixture.controlHandler.fallbackReplays = store
-	body := `{"operation_id":"fallback-1","session_id":"session-1","turn_id":"turn-1","target_language":"zh-CN","translated_text":"translated","language_config_version":3,"trace_id":"trace-1"}`
+	body := `{"operation_id":"fallback-1","session_id":"session-1","turn_id":"turn-1","target_language":"zh-CN","translated_text":"translated","language_config_version":3,"tts_profile_id":"tts_profile_01","trace_id":"trace-1"}`
 	done := make(chan *httptest.ResponseRecorder, 1)
 	go func() {
 		done <- fixture.request(http.MethodPost, "/realtime/v1/sessions/session-1/fallback-playback", body, "fallback:fallback-1")
@@ -194,7 +194,7 @@ func TestHandlerStopsFallbackWhenClaimRenewalFails(t *testing.T) {
 	firstFallback := &blockingFallbackPlaybackFake{entered: make(chan struct{}), release: make(chan struct{})}
 	fixture.controlHandler.fallback = firstFallback
 	fixture.controlHandler.fallbackReplays = store
-	body := `{"operation_id":"fallback-1","session_id":"session-1","turn_id":"turn-1","target_language":"zh-CN","translated_text":"translated","language_config_version":3,"trace_id":"trace-1"}`
+	body := `{"operation_id":"fallback-1","session_id":"session-1","turn_id":"turn-1","target_language":"zh-CN","translated_text":"translated","language_config_version":3,"tts_profile_id":"tts_profile_01","trace_id":"trace-1"}`
 	done := make(chan *httptest.ResponseRecorder, 1)
 	go func() {
 		done <- fixture.request(http.MethodPost, "/realtime/v1/sessions/session-1/fallback-playback", body, "fallback:fallback-1")
@@ -235,7 +235,7 @@ func TestHandlerCompletesFallbackWhenStoppingInFlightRenewal(t *testing.T) {
 		entered: make(chan struct{}),
 		release: store.renewEntered,
 	}
-	body := `{"operation_id":"fallback-1","session_id":"session-1","turn_id":"turn-1","target_language":"zh-CN","translated_text":"translated","language_config_version":3,"trace_id":"trace-1"}`
+	body := `{"operation_id":"fallback-1","session_id":"session-1","turn_id":"turn-1","target_language":"zh-CN","translated_text":"translated","language_config_version":3,"tts_profile_id":"tts_profile_01","trace_id":"trace-1"}`
 
 	firstDone := make(chan *httptest.ResponseRecorder, 1)
 	go func() {
@@ -282,7 +282,7 @@ func TestHandlerRetriesFallbackAfterExpiredProcessingClaim(t *testing.T) {
 	firstFixture := newFixture(t)
 	firstFixture.controlHandler.fallback = &fallbackPlaybackFake{err: errors.New("playback outcome unknown")}
 	firstFixture.controlHandler.fallbackReplays = store
-	body := `{"operation_id":"fallback-1","session_id":"session-1","turn_id":"turn-1","target_language":"zh-CN","translated_text":"translated","language_config_version":3,"trace_id":"trace-1"}`
+	body := `{"operation_id":"fallback-1","session_id":"session-1","turn_id":"turn-1","target_language":"zh-CN","translated_text":"translated","language_config_version":3,"tts_profile_id":"tts_profile_01","trace_id":"trace-1"}`
 	first := firstFixture.request(http.MethodPost, "/realtime/v1/sessions/session-1/fallback-playback", body, "fallback:fallback-1")
 	if first.Code != http.StatusInternalServerError {
 		t.Fatalf("failed fallback status = %d, body=%s", first.Code, first.Body.String())
@@ -307,7 +307,7 @@ func TestHandlerReleasesFallbackClaimWhenPlaybackDidNotStart(t *testing.T) {
 	firstFixture := newFixture(t)
 	firstFixture.controlHandler.fallback = &fallbackPlaybackFake{err: fallbackPlaybackNotStartedTestError{err: errors.New("runtime unavailable")}}
 	firstFixture.controlHandler.fallbackReplays = store
-	body := `{"operation_id":"fallback-1","session_id":"session-1","turn_id":"turn-1","target_language":"zh-CN","translated_text":"translated","language_config_version":3,"trace_id":"trace-1"}`
+	body := `{"operation_id":"fallback-1","session_id":"session-1","turn_id":"turn-1","target_language":"zh-CN","translated_text":"translated","language_config_version":3,"tts_profile_id":"tts_profile_01","trace_id":"trace-1"}`
 
 	first := firstFixture.request(http.MethodPost, "/realtime/v1/sessions/session-1/fallback-playback", body, "fallback:fallback-1")
 	if first.Code != http.StatusInternalServerError {
@@ -338,7 +338,7 @@ func TestHandlerKeepsFallbackClaimWhenAbortFails(t *testing.T) {
 	fixture := newFixture(t)
 	fixture.controlHandler.fallback = &fallbackPlaybackFake{err: fallbackPlaybackNotStartedTestError{err: errors.New("runtime unavailable")}}
 	fixture.controlHandler.fallbackReplays = store
-	body := `{"operation_id":"fallback-1","session_id":"session-1","turn_id":"turn-1","target_language":"zh-CN","translated_text":"translated","language_config_version":3,"trace_id":"trace-1"}`
+	body := `{"operation_id":"fallback-1","session_id":"session-1","turn_id":"turn-1","target_language":"zh-CN","translated_text":"translated","language_config_version":3,"tts_profile_id":"tts_profile_01","trace_id":"trace-1"}`
 
 	first := fixture.request(http.MethodPost, "/realtime/v1/sessions/session-1/fallback-playback", body, "fallback:fallback-1")
 	if first.Code != http.StatusInternalServerError {
@@ -354,7 +354,7 @@ func TestHandlerKeepsFallbackClaimWhenAbortFails(t *testing.T) {
 func TestHandlerRejectsInvalidFallbackRequests(t *testing.T) {
 	fixture := newFixture(t)
 	fixture.controlHandler.fallback = &fallbackPlaybackFake{}
-	validBody := `{"operation_id":"fallback-1","session_id":"session-1","turn_id":"turn-1","target_language":"zh-CN","translated_text":"translated","language_config_version":3,"trace_id":"trace-1"}`
+	validBody := `{"operation_id":"fallback-1","session_id":"session-1","turn_id":"turn-1","target_language":"zh-CN","translated_text":"translated","language_config_version":3,"tts_profile_id":"tts_profile_01","trace_id":"trace-1"}`
 	tests := []struct {
 		name           string
 		body           string
@@ -379,7 +379,7 @@ func TestHandlerReturnsCompletionFailureAndPayloadConflict(t *testing.T) {
 	fixture := newFixture(t)
 	fixture.controlHandler.fallback = &fallbackPlaybackFake{}
 	fixture.controlHandler.fallbackReplays = store
-	body := `{"operation_id":"fallback-1","session_id":"session-1","turn_id":"turn-1","target_language":"zh-CN","translated_text":"translated","language_config_version":3,"trace_id":"trace-1"}`
+	body := `{"operation_id":"fallback-1","session_id":"session-1","turn_id":"turn-1","target_language":"zh-CN","translated_text":"translated","language_config_version":3,"tts_profile_id":"tts_profile_01","trace_id":"trace-1"}`
 	failed := fixture.request(http.MethodPost, "/realtime/v1/sessions/session-1/fallback-playback", body, "fallback:fallback-1")
 	if failed.Code != http.StatusInternalServerError {
 		t.Fatalf("completion failure status = %d, body=%s; want internal error", failed.Code, failed.Body.String())

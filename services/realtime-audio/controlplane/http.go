@@ -263,7 +263,8 @@ func (h *Handler) fallbackPlayback(writer http.ResponseWriter, request *http.Req
 	}
 	if strings.TrimSpace(body.OperationID) == "" || strings.TrimSpace(body.SessionID) != sessionID ||
 		strings.TrimSpace(body.TurnID) == "" || strings.TrimSpace(body.TargetLanguage) == "" ||
-		strings.TrimSpace(body.TranslatedText) == "" || body.LanguageConfigVersion < 1 || strings.TrimSpace(body.TraceID) == "" {
+		strings.TrimSpace(body.TranslatedText) == "" || body.LanguageConfigVersion < 1 ||
+		strings.TrimSpace(body.TTSProfileID) == "" || strings.TrimSpace(body.TraceID) == "" {
 		h.writeError(writer, request, ErrInvalidRequest)
 		return
 	}

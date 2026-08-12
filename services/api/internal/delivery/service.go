@@ -422,10 +422,14 @@ func (u *UseCases) RecoverAutomaticTurn(ctx context.Context, accountID, turnID s
 	if !claimed {
 		return nil
 	}
+	if run.TTSProfileID == nil || strings.TrimSpace(*run.TTSProfileID) == "" {
+		return fmt.Errorf("fallback TTS profile unavailable: %w", domain.ErrConflict)
+	}
+	ttsProfileID := strings.TrimSpace(*run.TTSProfileID)
 	_, err = u.fallback.PlayFallback(ctx, run.SessionID, realtimev1.FallbackPlaybackRequest{
 		OperationID: run.FallbackOperationID, SessionID: run.SessionID, TurnID: run.TurnID,
 		TargetLanguage: run.TargetLanguage, TranslatedText: run.TranslatedText,
-		LanguageConfigVersion: int(run.LanguageConfigVersion), TraceID: run.TraceID,
+		LanguageConfigVersion: int(run.LanguageConfigVersion), TTSProfileID: ttsProfileID, TraceID: run.TraceID,
 	})
 	if err != nil {
 		return fmt.Errorf("play automatic fallback: %w", err)

@@ -3,6 +3,7 @@ package delivery
 import (
 	"context"
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/1024XEngineer/xe6-tsy/services/api/internal/domain"
@@ -20,8 +21,9 @@ func (r *PostgresRepository) ListAutomaticTurnRecoveryCandidates(ctx context.Con
 		language_config_version,tts_profile_id,status,target_count,settled_count,succeeded_count,
 		failed_count,fallback_operation_id,created_at,updated_at
 		FROM automatic_turn_runs
-		WHERE (target_count=0 AND status='pending')
-		   OR (target_count>0 AND failed_count=target_count AND status IN ('failed','fallback_pending'))
+		WHERE ((target_count=0 AND status='pending')
+		   OR (target_count>0 AND failed_count=target_count AND status IN ('failed','fallback_pending')))
+		  AND NULLIF(BTRIM(tts_profile_id), '') IS NOT NULL
 		ORDER BY updated_at ASC, turn_id ASC
 		LIMIT $1`, limit)
 	if err != nil {
@@ -84,6 +86,9 @@ func (r *PostgresRepository) ClaimAutomaticTurnFallback(ctx context.Context, acc
 			return mapDeliveryError(err)
 		}
 		now := time.Now().UTC()
+		if run.TTSProfileID == nil || strings.TrimSpace(*run.TTSProfileID) == "" {
+			return domain.ErrConflict
+		}
 		if run.Status == AutomaticTurnRunFallbackPending {
 			// A fresh pending row is owned by another worker. An expired lease may
 			// retry the same operation because realtime durably deduplicates it.

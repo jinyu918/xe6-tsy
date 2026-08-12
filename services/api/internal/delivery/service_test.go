@@ -480,7 +480,8 @@ func TestRecoverAutomaticTurnPlaysPersistedFallbackSnapshot(t *testing.T) {
 	run := AutomaticTurnRun{
 		AccountID: "account-1", TurnID: "turn-1", SessionID: "session-1", TraceID: "trace-1",
 		TargetLanguage: "zh-CN", TranslatedText: "译文", LanguageConfigVersion: 3,
-		Status: AutomaticTurnRunFailed, TargetCount: 2, FailedCount: 2,
+		TTSProfileID: stringPointer("tts_profile_01"),
+		Status:       AutomaticTurnRunFailed, TargetCount: 2, FailedCount: 2,
 		FallbackOperationID: "fallback_turn-1",
 	}
 	repository := &atomicScheduleRepository{existing: run}
@@ -502,7 +503,8 @@ func TestRecoverAutomaticTurnLeavesPendingWhenPlaybackFails(t *testing.T) {
 	repository := &atomicScheduleRepository{existing: AutomaticTurnRun{
 		AccountID: "account-1", TurnID: "turn-1", SessionID: "session-1", TraceID: "trace-1",
 		TargetLanguage: "zh-CN", TranslatedText: "译文", LanguageConfigVersion: 3,
-		Status: AutomaticTurnRunFailed, TargetCount: 1, FailedCount: 1, FallbackOperationID: "fallback_turn-1",
+		TTSProfileID: stringPointer("tts_profile_01"),
+		Status:       AutomaticTurnRunFailed, TargetCount: 1, FailedCount: 1, FallbackOperationID: "fallback_turn-1",
 	}}
 	player := &fallbackPlayerFake{err: errors.New("realtime unavailable")}
 	service := NewPersistentUseCases(repository, nil, nil, nil)
@@ -520,7 +522,8 @@ func TestRecoverAutomaticTurnReportsFallbackStateUpdateFailure(t *testing.T) {
 		existing: AutomaticTurnRun{
 			AccountID: "account-1", TurnID: "turn-1", SessionID: "session-1",
 			TargetLanguage: "zh-CN", TranslatedText: "译文", LanguageConfigVersion: 3,
-			Status: AutomaticTurnRunFailed, FallbackOperationID: "fallback_turn-1",
+			TTSProfileID: stringPointer("tts_profile_01"),
+			Status:       AutomaticTurnRunFailed, FallbackOperationID: "fallback_turn-1",
 		},
 		fallbackPlayedErr: errors.New("fallback state unavailable"),
 	}
@@ -530,6 +533,28 @@ func TestRecoverAutomaticTurnReportsFallbackStateUpdateFailure(t *testing.T) {
 	err := service.RecoverAutomaticTurn(t.Context(), "account-1", "turn-1")
 	if err == nil || err.Error() != "mark automatic fallback played: fallback state unavailable" {
 		t.Fatalf("RecoverAutomaticTurn() error = %v", err)
+	}
+}
+
+func TestRecoverAutomaticTurnRejectsMissingTTSProfileWithoutPlayback(t *testing.T) {
+	repository := &atomicScheduleRepository{existing: AutomaticTurnRun{
+		AccountID: "account-1", TurnID: "turn-1", SessionID: "session-1", TraceID: "trace-1",
+		TargetLanguage: "zh-CN", TranslatedText: "译文", LanguageConfigVersion: 3,
+		Status: AutomaticTurnRunFailed, TargetCount: 1, FailedCount: 1, FallbackOperationID: "fallback_turn-1",
+	}}
+	player := &fallbackPlayerFake{}
+	service := NewPersistentUseCases(repository, nil, nil, nil)
+	service.ConfigureAutomaticFallback(player)
+
+	err := service.RecoverAutomaticTurn(t.Context(), "account-1", "turn-1")
+	if !errors.Is(err, domain.ErrConflict) {
+		t.Fatalf("RecoverAutomaticTurn() error = %v, want conflict", err)
+	}
+	if player.calls != 0 {
+		t.Fatalf("fallback calls = %d, want 0", player.calls)
+	}
+	if repository.fallbackPlayed {
+		t.Fatal("fallback run was marked played despite missing TTS profile")
 	}
 }
 

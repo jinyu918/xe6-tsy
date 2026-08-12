@@ -683,7 +683,7 @@ components:
     FallbackPlaybackRequest:
       type: object
       additionalProperties: false
-      required: [operation_id, session_id, turn_id, target_language, translated_text, language_config_version, trace_id]
+      required: [operation_id, session_id, turn_id, target_language, translated_text, language_config_version, tts_profile_id, trace_id]
       properties:
         operation_id: { type: string, minLength: 1 }
         session_id: { type: string, minLength: 1 }
@@ -691,6 +691,7 @@ components:
         target_language: { type: string, minLength: 1 }
         translated_text: { type: string, minLength: 1 }
         language_config_version: { type: integer, minimum: 1 }
+        tts_profile_id: { type: string, minLength: 1 }
         trace_id: { type: string, minLength: 1 }
     FallbackPlaybackReceiptStatus:
       type: string

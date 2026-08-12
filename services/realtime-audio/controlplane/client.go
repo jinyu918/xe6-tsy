@@ -138,7 +138,8 @@ func (c *Client) PlayFallback(ctx context.Context, sessionID string, request rea
 	if strings.TrimSpace(sessionID) == "" || strings.TrimSpace(request.OperationID) == "" ||
 		request.SessionID != sessionID || strings.TrimSpace(request.TurnID) == "" ||
 		strings.TrimSpace(request.TargetLanguage) == "" || strings.TrimSpace(request.TranslatedText) == "" ||
-		request.LanguageConfigVersion < 1 || strings.TrimSpace(request.TraceID) == "" {
+		request.LanguageConfigVersion < 1 || strings.TrimSpace(request.TTSProfileID) == "" ||
+		strings.TrimSpace(request.TraceID) == "" {
 		return realtimev1.FallbackPlaybackReceipt{}, ErrClientRequest
 	}
 	token, err := c.ticket(ctx, sessionID)

@@ -98,7 +98,8 @@ func TestAutomaticTurnFallbackWorkerRecoversTotalInitialFailureWithoutRetry(t *t
 	run := AutomaticTurnRun{
 		AccountID: "account-1", TurnID: "turn-1", SessionID: "session-1", TraceID: "trace-1",
 		TargetLanguage: "zh-CN", TranslatedText: "译文", LanguageConfigVersion: 3,
-		Status: AutomaticTurnRunFailed, TargetCount: 1, SettledCount: 1, FailedCount: 1,
+		TTSProfileID: stringPointer("tts_profile_01"),
+		Status:       AutomaticTurnRunFailed, TargetCount: 1, SettledCount: 1, FailedCount: 1,
 		FallbackOperationID: "fallback_turn-1",
 	}
 	message := Message{ID: "message-1", AccountID: "account-1", Status: MessageStatusFailed, Attempts: 1}
