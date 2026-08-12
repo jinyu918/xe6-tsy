@@ -10,6 +10,7 @@ import (
 	recordsv1 "github.com/1024XEngineer/xe6-tsy/packages/contracts/records/v1"
 	"github.com/1024XEngineer/xe6-tsy/services/realtime-audio/asr"
 	"github.com/1024XEngineer/xe6-tsy/services/realtime-audio/session"
+	"github.com/1024XEngineer/xe6-tsy/services/realtime-audio/speech"
 	"github.com/1024XEngineer/xe6-tsy/services/realtime-audio/translate"
 	"github.com/1024XEngineer/xe6-tsy/services/realtime-audio/tts"
 )
@@ -46,6 +47,14 @@ type AudioPlaybackLifecycle interface {
 	Cancel(ctx context.Context, sessionID, playbackID, reason string) error
 }
 
+// FallbackTTSResolver resolves the immutable TTS provider selection retained
+// with a historical FinalTurn. It keeps Profile Registry details out of the
+// playback flow while ensuring fallback cannot use the current session default.
+type FallbackTTSResolver interface {
+	TTS(profileID string) (tts.Provider, error)
+	TTSProfile(profileID string) (speech.Profile, error)
+}
+
 // FinalTurnCommit publishes one immutable FinalTurn while the runtime mode
 // generation remains protected by its coordinator.
 type FinalTurnCommit func(ctx context.Context) error
@@ -72,6 +81,7 @@ type PipelineDependencies struct {
 	Now                 func() time.Time
 	Latency             LatencyLogger
 	Speech              *SpeechOutput
+	FallbackTTS         FallbackTTSResolver
 }
 
 // PipelineService orchestrates one final ASR result through translation and TTS.
@@ -83,6 +93,7 @@ type PipelineService struct {
 	usage               UsageFactSink
 	runtime             session.RuntimeStateReporter
 	speech              *SpeechOutput
+	fallbackTTS         FallbackTTSResolver
 	now                 func() time.Time
 	latency             LatencyLogger
 }
@@ -106,8 +117,9 @@ func NewPipelineService(deps PipelineDependencies) *PipelineService {
 		translator: deps.Translator, translationProvider: deps.TranslationProvider,
 		finalTurns: deps.FinalTurns, finalGate: deps.FinalGate,
 		usage: deps.Usage, runtime: deps.Runtime,
-		speech: speech,
-		now:    now, latency: deps.Latency,
+		speech:      speech,
+		fallbackTTS: deps.FallbackTTS,
+		now:         now, latency: deps.Latency,
 	}
 }
 

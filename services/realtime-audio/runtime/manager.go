@@ -21,6 +21,7 @@ import (
 	"github.com/1024XEngineer/xe6-tsy/services/realtime-audio/pipeline"
 	"github.com/1024XEngineer/xe6-tsy/services/realtime-audio/segment"
 	"github.com/1024XEngineer/xe6-tsy/services/realtime-audio/session"
+	"github.com/1024XEngineer/xe6-tsy/services/realtime-audio/speech"
 	"github.com/1024XEngineer/xe6-tsy/services/realtime-audio/translate"
 	"github.com/1024XEngineer/xe6-tsy/services/realtime-audio/vad"
 )
@@ -115,6 +116,7 @@ type Dependencies struct {
 	Allocator            pipeline.TurnAllocator
 	VoiceID              string
 	SpeechBindings       SpeechBindingCoordinator
+	SpeechProviders      *speech.ProviderRegistry
 	Logger               *slog.Logger
 	Latency              *slog.Logger
 	ProviderFailures     pipeline.ProviderFailureObserver
@@ -255,13 +257,14 @@ func newManagerWithLabels(providers config.Providers, labels providerLabels, dep
 	commitGate := managerTurnCommitGate{manager: manager}
 	service := pipeline.NewPipelineService(pipeline.PipelineDependencies{
 		Translator: providers.Translation, TranslationProvider: labels.translation,
-		FinalTurns: deps.FinalTurns,
-		FinalGate:  commitGate,
-		Usage:      deps.Usage,
-		Runtime:    deps.Runtime,
-		Now:        deps.Now,
-		Speech:     speech,
-		Latency:    latency,
+		FinalTurns:  deps.FinalTurns,
+		FinalGate:   commitGate,
+		Usage:       deps.Usage,
+		Runtime:     deps.Runtime,
+		Now:         deps.Now,
+		Speech:      speech,
+		FallbackTTS: deps.SpeechProviders,
+		Latency:     latency,
 	})
 	// Router 注册表是模式能力的单一来源：Coordinator 会复用同一份模式列表，
 	// 从而保证“允许切换”的模式一定存在对应 Handler，不会出现状态切换成功但没有业务处理器的半配置状态。
@@ -328,7 +331,8 @@ func (m *Manager) PlayFallback(ctx context.Context, request realtimev1.FallbackP
 		SessionID: request.SessionID, TurnID: request.TurnID, AccountID: accountID,
 		TraceID: request.TraceID, TargetLanguage: request.TargetLanguage,
 		TranslatedText: request.TranslatedText, LanguageConfigVersion: int64(request.LanguageConfigVersion),
-		PlaybackID: "fallback_" + request.OperationID,
+		TTSProfileID: request.TTSProfileID,
+		PlaybackID:   "fallback_" + request.OperationID,
 	})
 }
 
