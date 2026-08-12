@@ -74,6 +74,135 @@ func TestAsyncAPIFinalTurnContract(t *testing.T) {
 	}
 }
 
+func TestAsyncAPILanguageConfigChangedContract(t *testing.T) {
+	spec := readAsyncAPI(t)
+	channels := mapValue(t, spec, "channels")
+	channel := mapValue(t, channels, "languageConfigChanged")
+	if got, want := channel["address"], "language.config.changed"; got != want {
+		t.Fatalf("language configuration channel address = %v, want %q", got, want)
+	}
+	if got, want := mapValue(t, mapValue(t, channel, "messages"), "languageConfigChanged")["$ref"], "#/components/messages/LanguageConfigChanged"; got != want {
+		t.Fatalf("language configuration channel message ref = %v, want %q", got, want)
+	}
+
+	operations := mapValue(t, spec, "operations")
+	for name, action := range map[string]string{
+		"sendLanguageConfigChanged":    "send",
+		"consumeLanguageConfigChanged": "receive",
+	} {
+		operation := mapValue(t, operations, name)
+		if got := operation["action"]; got != action {
+			t.Fatalf("%s action = %v, want %q", name, got, action)
+		}
+		if got, want := mapValue(t, operation, "channel")["$ref"], "#/channels/languageConfigChanged"; got != want {
+			t.Fatalf("%s channel ref = %v, want %q", name, got, want)
+		}
+	}
+
+	components := mapValue(t, spec, "components")
+	message := mapValue(t, mapValue(t, components, "messages"), "LanguageConfigChanged")
+	if got, want := message["name"], "language.config.changed"; got != want {
+		t.Fatalf("language configuration message name = %v, want %q", got, want)
+	}
+	if got, want := message["contentType"], "application/json"; got != want {
+		t.Fatalf("language configuration message content type = %v, want %q", got, want)
+	}
+	if got, want := mapValue(t, message, "payload")["$ref"], "#/components/schemas/LanguageConfigChangedEvent"; got != want {
+		t.Fatalf("language configuration message payload ref = %v, want %q", got, want)
+	}
+
+	schema := mapValue(t, mapValue(t, components, "schemas"), "LanguageConfigChangedEvent")
+	if got, want := schema["additionalProperties"], false; got != want {
+		t.Fatalf("LanguageConfigChangedEvent additionalProperties = %v, want %t", got, want)
+	}
+	assertExactStringSet(t, schema["required"], []string{
+		"event_version", "event_id", "trace_id", "session_id", "language_config_version",
+		"language_pairs", "output_routes", "occurred_at",
+	})
+
+	properties := mapValue(t, schema, "properties")
+	if got, want := mapValue(t, properties, "event_version")["const"], 1; got != want {
+		t.Fatalf("LanguageConfigChangedEvent event_version = %v, want %d", got, want)
+	}
+	if got, want := mapValue(t, properties, "language_config_version")["minimum"], 1; got != want {
+		t.Fatalf("LanguageConfigChangedEvent language_config_version minimum = %v, want %d", got, want)
+	}
+	for _, field := range []string{"event_id", "trace_id", "session_id"} {
+		if got, want := mapValue(t, properties, field)["minLength"], 1; got != want {
+			t.Fatalf("LanguageConfigChangedEvent %s minLength = %v, want %d", field, got, want)
+		}
+	}
+	if got, want := mapValue(t, properties, "occurred_at")["format"], "date-time"; got != want {
+		t.Fatalf("LanguageConfigChangedEvent occurred_at format = %v, want %q", got, want)
+	}
+
+	languagePairs := mapValue(t, properties, "language_pairs")
+	if got, want := languagePairs["minItems"], 1; got != want {
+		t.Fatalf("language_pairs minItems = %v, want %d", got, want)
+	}
+	languagePair := mapValue(t, languagePairs, "items")
+	assertLanguageConfigNestedObject(t, languagePair, []string{"source", "target"})
+	languagePairProperties := mapValue(t, languagePair, "properties")
+	for _, field := range []string{"source", "target"} {
+		if got, want := mapValue(t, languagePairProperties, field)["type"], "string"; got != want {
+			t.Fatalf("language pair %s type = %v, want %q", field, got, want)
+		}
+		if got, want := mapValue(t, languagePairProperties, field)["minLength"], 1; got != want {
+			t.Fatalf("language pair %s minLength = %v, want %d", field, got, want)
+		}
+	}
+
+	outputRoutes := mapValue(t, properties, "output_routes")
+	if got, want := outputRoutes["minItems"], 1; got != want {
+		t.Fatalf("output_routes minItems = %v, want %d", got, want)
+	}
+	outputRoute := mapValue(t, outputRoutes, "items")
+	assertLanguageConfigNestedObject(t, outputRoute, []string{"target_language", "tts_enabled", "delivery_enabled"})
+	outputRouteProperties := mapValue(t, outputRoute, "properties")
+	if got, want := mapValue(t, outputRouteProperties, "target_language")["minLength"], 1; got != want {
+		t.Fatalf("output route target_language minLength = %v, want %d", got, want)
+	}
+	for _, field := range []string{"tts_enabled", "delivery_enabled"} {
+		if got, want := mapValue(t, outputRouteProperties, field)["type"], "boolean"; got != want {
+			t.Fatalf("output route %s type = %v, want %q", field, got, want)
+		}
+	}
+
+	for _, forbidden := range []string{
+		"asr_profile_id", "tts_profile_id", "provider", "provider_code", "model", "voice_id",
+		"asr_provider", "tts_provider", "asr_model", "tts_model", "tts_voice_id", "routing_policy_version",
+	} {
+		if _, exists := properties[forbidden]; exists {
+			t.Fatalf("LanguageConfigChangedEvent must not expose %q", forbidden)
+		}
+	}
+}
+
+func assertLanguageConfigNestedObject(t *testing.T, schema map[string]any, required []string) {
+	t.Helper()
+	if got, want := schema["type"], "object"; got != want {
+		t.Fatalf("nested schema type = %v, want %q", got, want)
+	}
+	if got, want := schema["additionalProperties"], false; got != want {
+		t.Fatalf("nested schema additionalProperties = %v, want %t", got, want)
+	}
+	assertExactStringSet(t, schema["required"], required)
+	mapValue(t, schema, "properties")
+}
+
+func assertExactStringSet(t *testing.T, value any, want []string) {
+	t.Helper()
+	actual := stringSet(t, value)
+	if len(actual) != len(want) {
+		t.Fatalf("string set length = %d, want %d; actual = %v", len(actual), len(want), actual)
+	}
+	for _, item := range want {
+		if !actual[item] {
+			t.Fatalf("string set is missing %q; actual = %v", item, actual)
+		}
+	}
+}
+
 func TestAsyncAPIFinalTurnPayloadExamples(t *testing.T) {
 	schema := finalTurnSchema(t)
 
