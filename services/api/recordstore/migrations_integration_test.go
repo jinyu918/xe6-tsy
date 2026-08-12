@@ -61,6 +61,7 @@ func TestMigrateRecordsSchema(t *testing.T) {
 		{27, "assistant_llm_usage"},
 		{28, "realtime_mode_projection"},
 		{29, "final_turn_speech_profiles"},
+		{30, "automatic_turn_fallback_tts_profile"},
 	}
 	if len(statuses) != len(want) {
 		t.Fatalf("len(AppliedMigrations()) = %d, want %d", len(statuses), len(want))
@@ -124,9 +125,70 @@ func TestRecordSchemaConstraints(t *testing.T) {
 	testConcurrentSpeakerMappingConstraint(t, pool)
 	testProviderSpeakerConstraint(t, pool)
 	testTurnConstraints(t, pool)
+	testAutomaticFallbackTTSSnapshotConstraints(t, pool)
 	testSessionLifecycleConstraints(t, pool)
 	testStartOperationConstraints(t, pool)
 	testStartOperationStateConstraints(t, pool)
+}
+
+func testAutomaticFallbackTTSSnapshotConstraints(t *testing.T, pool *pgxpool.Pool) {
+	t.Helper()
+	createdAt := time.Date(2026, time.August, 12, 10, 0, 0, 0, time.UTC)
+	updatedAt := createdAt.Add(time.Minute)
+	if _, err := pool.Exec(t.Context(), `
+		INSERT INTO lingow_accounts (id, kind, created_at)
+		VALUES ('acct_fallback_tts', 'anonymous', $1)`, createdAt); err != nil {
+		t.Fatalf("insert fallback TTS account: %v", err)
+	}
+	if _, err := pool.Exec(t.Context(), `
+		INSERT INTO automatic_turn_runs (
+			account_id, turn_id, session_id, trace_id, target_language, translated_text,
+			language_config_version, tts_profile_id, status, target_count,
+			fallback_operation_id, created_at, updated_at
+		) VALUES (
+			'acct_fallback_tts', 'turn_fallback_tts', 'session_fallback_tts', 'trace_fallback_tts', 'en-US', 'translation',
+			1, 'tts_profile_01', 'pending', 0, 'fallback_turn_fallback_tts', $1, $1
+		)`, createdAt); err != nil {
+		t.Fatalf("insert fallback TTS snapshot: %v", err)
+	}
+	if _, err := pool.Exec(t.Context(), `
+		UPDATE automatic_turn_runs
+		SET status = 'failed', updated_at = $1
+		WHERE account_id = 'acct_fallback_tts' AND turn_id = 'turn_fallback_tts'`, updatedAt); err != nil {
+		t.Fatalf("update fallback run status: %v", err)
+	}
+	if _, err := pool.Exec(t.Context(), `
+		UPDATE automatic_turn_runs
+		SET tts_profile_id = 'tts_profile_02'
+		WHERE account_id = 'acct_fallback_tts' AND turn_id = 'turn_fallback_tts'`); err == nil {
+		t.Fatal("updating immutable fallback TTS profile succeeded, want an error")
+	}
+	if _, err := pool.Exec(t.Context(), `
+		INSERT INTO automatic_turn_runs (
+			account_id, turn_id, session_id, trace_id, target_language, translated_text,
+			language_config_version, status, target_count, fallback_operation_id, created_at, updated_at
+		) VALUES (
+			'acct_fallback_tts', 'turn_fallback_legacy', 'session_fallback_tts', 'trace_fallback_legacy', 'en-US', 'translation',
+			1, 'pending', 0, 'fallback_turn_fallback_legacy', $1, $1
+		)`, createdAt); err != nil {
+		t.Fatalf("insert legacy fallback snapshot: %v", err)
+	}
+	var legacyProfileID *string
+	if err := pool.QueryRow(t.Context(), `
+		SELECT tts_profile_id
+		FROM automatic_turn_runs
+		WHERE account_id = 'acct_fallback_tts' AND turn_id = 'turn_fallback_legacy'`).Scan(&legacyProfileID); err != nil {
+		t.Fatalf("read legacy fallback TTS profile: %v", err)
+	}
+	if legacyProfileID != nil {
+		t.Fatalf("legacy fallback TTS profile = %q, want nil", *legacyProfileID)
+	}
+	if _, err := pool.Exec(t.Context(), `
+		UPDATE automatic_turn_runs
+		SET tts_profile_id = 'tts_profile_guessed'
+		WHERE account_id = 'acct_fallback_tts' AND turn_id = 'turn_fallback_legacy'`); err == nil {
+		t.Fatal("backfilling a legacy fallback TTS profile succeeded, want an error")
+	}
 }
 
 func testSessionLifecycleConstraints(t *testing.T, pool *pgxpool.Pool) {

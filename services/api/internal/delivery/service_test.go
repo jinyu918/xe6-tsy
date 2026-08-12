@@ -315,6 +315,38 @@ func TestScheduleFinalTurnUsesAtomicRepositoryForEveryEnabledTarget(t *testing.T
 	}
 }
 
+func TestScheduleFinalTurnSnapshotsTTSProfileAndRejectsProfileReplayConflict(t *testing.T) {
+	profileID := "tts_profile_01"
+	repository := &atomicScheduleRepository{retryRepositoryStub: retryRepositoryStub{preferences: []Preference{
+		{AccountID: "account-1", Channel: ChannelWeChat, DestinationRef: "primary-wechat", Enabled: true, Verified: true},
+	}}}
+	service := NewPersistentUseCases(repository, automaticTurnReaderStub{}, automaticDestinationReaderStub{}, nil)
+	event := recordsv1.FinalTurnEvent{
+		TurnID: "turn-1", SessionID: "session-1", TraceID: "trace-1", TargetLanguage: "en-US",
+		TranslatedText: "translation", LanguageConfigVersion: 3, TTSProfileID: &profileID, DeliveryEnabled: true,
+	}
+	if err := service.ScheduleFinalTurn(t.Context(), "account-1", event); err != nil {
+		t.Fatalf("ScheduleFinalTurn() error = %v", err)
+	}
+	if repository.record.Run.TTSProfileID == nil || *repository.record.Run.TTSProfileID != profileID {
+		t.Fatalf("scheduled TTS profile = %#v, want %q", repository.record.Run.TTSProfileID, profileID)
+	}
+	if repository.record.Run.TTSProfileID == event.TTSProfileID {
+		t.Fatal("scheduled TTS profile pointer aliases the event")
+	}
+	profileID = "tts_profile_mutated"
+	if *repository.record.Run.TTSProfileID != "tts_profile_01" {
+		t.Fatalf("scheduled TTS profile changed after event mutation = %q", *repository.record.Run.TTSProfileID)
+	}
+
+	repository.existing = repository.record.Run
+	conflictingProfileID := "tts_profile_02"
+	event.TTSProfileID = &conflictingProfileID
+	if err := service.ScheduleFinalTurn(t.Context(), "account-1", event); !errors.Is(err, domain.ErrConflict) {
+		t.Fatalf("profile-conflicting replay error = %v, want conflict", err)
+	}
+}
+
 func TestScheduleFinalTurnAtomicRejectsInvalidAndConflictingEvents(t *testing.T) {
 	validEvent := recordsv1.FinalTurnEvent{
 		TurnID: "turn-1", SessionID: "session-1", TraceID: "trace-1", TargetLanguage: "en-US",

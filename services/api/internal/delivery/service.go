@@ -288,7 +288,8 @@ func (u *UseCases) scheduleAutomaticTurnAtomically(ctx context.Context, schedule
 	existing, err := scheduler.GetAutomaticTurnRun(ctx, accountID, event.TurnID)
 	if err == nil {
 		if existing.SessionID != event.SessionID || existing.TraceID != event.TraceID || existing.TargetLanguage != event.TargetLanguage ||
-			existing.TranslatedText != event.TranslatedText || existing.LanguageConfigVersion != event.LanguageConfigVersion {
+			existing.TranslatedText != event.TranslatedText || existing.LanguageConfigVersion != event.LanguageConfigVersion ||
+			!sameOptionalString(existing.TTSProfileID, event.TTSProfileID) {
 			return domain.ErrConflict
 		}
 		return nil
@@ -336,7 +337,8 @@ func (u *UseCases) scheduleAutomaticTurnAtomically(ctx context.Context, schedule
 	run := AutomaticTurnRun{
 		AccountID: accountID, TurnID: event.TurnID, SessionID: event.SessionID, TraceID: event.TraceID,
 		TargetLanguage: event.TargetLanguage, TranslatedText: event.TranslatedText,
-		LanguageConfigVersion: event.LanguageConfigVersion, Status: AutomaticTurnRunPending,
+		LanguageConfigVersion: event.LanguageConfigVersion, TTSProfileID: cloneString(event.TTSProfileID),
+		Status:      AutomaticTurnRunPending,
 		TargetCount: len(targets), FallbackOperationID: "fallback_" + event.TurnID,
 		CreatedAt: now, UpdatedAt: now,
 	}
@@ -657,4 +659,11 @@ func cloneString(value *string) *string {
 	}
 	copy := *value
 	return &copy
+}
+
+func sameOptionalString(left, right *string) bool {
+	if left == nil || right == nil {
+		return left == nil && right == nil
+	}
+	return *left == *right
 }
