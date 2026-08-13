@@ -54,7 +54,6 @@ func TestBuildSpeechRegistryWithMockTTSKeepsCatalogValidationAndBlocksVendorSynt
 	catalog := validSpeechCatalog()
 	registry, _, err := BuildSpeechRegistryWithMockTTS(catalog, config.ProviderConfig{
 		ASR: config.ASRConfig{APIKey: "asr-key", BaseURL: "https://example.com/compatible-mode/v1"},
-		TTS: config.TTSConfig{APIKey: "tts-key", BaseURL: "https://example.com/api/v1"},
 	})
 	if err != nil {
 		t.Fatalf("BuildSpeechRegistryWithMockTTS() error = %v", err)
@@ -67,12 +66,36 @@ func TestBuildSpeechRegistryWithMockTTSKeepsCatalogValidationAndBlocksVendorSynt
 		t.Fatalf("TTS adapter = %T, want offline fake", adapter)
 	}
 
-	catalog.TTSProfiles[0].ProviderCode = "unsupported"
-	if _, _, err := BuildSpeechRegistryWithMockTTS(catalog, config.ProviderConfig{
-		ASR: config.ASRConfig{APIKey: "asr-key", BaseURL: "https://example.com/compatible-mode/v1"},
-		TTS: config.TTSConfig{APIKey: "tts-key", BaseURL: "https://example.com/api/v1"},
-	}); !errors.Is(err, config.ErrUnsupportedProvider) {
-		t.Fatalf("unsupported profile error = %v, want provider validation", err)
+	for _, test := range []struct {
+		name   string
+		mutate func(*SpeechCatalog)
+		want   error
+	}{
+		{
+			name: "unsupported provider",
+			mutate: func(catalog *SpeechCatalog) {
+				catalog.TTSProfiles[0].ProviderCode = "unsupported"
+			},
+			want: config.ErrUnsupportedProvider,
+		},
+		{
+			name: "unsupported model",
+			mutate: func(catalog *SpeechCatalog) {
+				catalog.TTSProfiles[0].Model = "unsupported"
+			},
+			want: config.ErrUnsupportedModel,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			catalog := validSpeechCatalog()
+			test.mutate(&catalog)
+			_, _, err := BuildSpeechRegistryWithMockTTS(catalog, config.ProviderConfig{
+				ASR: config.ASRConfig{APIKey: "asr-key", BaseURL: "https://example.com/compatible-mode/v1"},
+			})
+			if !errors.Is(err, test.want) {
+				t.Fatalf("BuildSpeechRegistryWithMockTTS() error = %v, want %v", err, test.want)
+			}
+		})
 	}
 }
 

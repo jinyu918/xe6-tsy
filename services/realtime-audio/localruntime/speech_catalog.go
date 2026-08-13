@@ -116,16 +116,22 @@ func buildSpeechRegistry(catalog SpeechCatalog, providerConfig config.ProviderCo
 	}
 	ttsRegistrations := make([]speech.TTSProfile, 0, len(catalog.TTSProfiles))
 	for _, profile := range catalog.TTSProfiles {
-		deployment := providerConfig.TTS
-		deployment.SampleRate = profile.OutputSampleRateHz
-		adapter, err := config.BuildTTSProfileAdapter(profile.ProviderCode, profile.Model, profile.VoiceID, deployment)
-		if err != nil {
-			return nil, nil, fmt.Errorf("build TTS profile %q: %w", profile.ID, err)
-		}
+		var adapter tts.Provider
 		if mockTTS {
+			if err := config.ValidateTTSProfile(profile.ProviderCode, profile.Model, profile.VoiceID); err != nil {
+				return nil, nil, fmt.Errorf("validate TTS profile %q: %w", profile.ID, err)
+			}
 			adapter = tts.NewFakeProvider(tts.FakeProviderConfig{
 				Result: tts.Result{Provider: "mock-tts", Model: "fake"},
 			})
+		} else {
+			deployment := providerConfig.TTS
+			deployment.SampleRate = profile.OutputSampleRateHz
+			var err error
+			adapter, err = config.BuildTTSProfileAdapter(profile.ProviderCode, profile.Model, profile.VoiceID, deployment)
+			if err != nil {
+				return nil, nil, fmt.Errorf("build TTS profile %q: %w", profile.ID, err)
+			}
 		}
 		ttsRegistrations = append(ttsRegistrations, speech.TTSProfile{
 			Profile: speech.Profile{
