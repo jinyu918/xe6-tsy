@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"sync"
 
+	realtimev1 "github.com/1024XEngineer/xe6-tsy/packages/contracts/realtime/v1"
 	"github.com/oklog/ulid/v2"
 )
 
@@ -16,6 +17,8 @@ type MemoryStore struct {
 	languages []SupportedLanguage
 	configs   []LanguageConfig
 	idempo    map[string]string // idempotency key -> config id
+	outbox    []realtimev1.LanguageConfigChangedEvent
+	failEvent error
 }
 
 func NewMemoryStore(clock Clock, languages []SupportedLanguage) *MemoryStore {
@@ -74,6 +77,10 @@ func (s *MemoryStore) GetConfigByIdempotencyKey(_ context.Context, idempotencyKe
 func (s *MemoryStore) CreateActiveConfig(_ context.Context, input CreateConfigInput) (LanguageConfig, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	routes, err := normalizeOutputRoutes(input.LanguagePairs, input.OutputRoutes)
+	if err != nil {
+		return LanguageConfig{}, err
+	}
 
 	if input.IdempotencyKey != "" {
 		if _, exists := s.idempo[input.IdempotencyKey]; exists {
@@ -98,29 +105,65 @@ func (s *MemoryStore) CreateActiveConfig(_ context.Context, input CreateConfigIn
 	}
 
 	now := s.clock.Now().UTC()
-	if currentIdx >= 0 {
-		until := now
-		s.configs[currentIdx].Status = StatusSuperseded
-		s.configs[currentIdx].EffectiveUntil = &until
-	}
-
 	cfg := LanguageConfig{
 		ID:                 ulid.Make().String(),
 		SessionID:          input.SessionID,
 		Version:            nextVersion,
 		LanguagePairs:      append([]LanguagePair(nil), input.LanguagePairs...),
-		OutputRoutes:       append([]OutputRoute(nil), input.OutputRoutes...),
+		OutputRoutes:       append([]OutputRoute(nil), routes...),
 		Status:             StatusActive,
 		EffectiveFrom:      now,
 		CreatedBy:          input.CreatedBy,
 		CreatedAt:          now,
 		RequestFingerprint: input.RequestFingerprint,
 	}
+	event, err := languageConfigChangedEvent(cfg, input.TraceID)
+	if err != nil {
+		return LanguageConfig{}, err
+	}
+	if s.failEvent != nil {
+		err := s.failEvent
+		s.failEvent = nil
+		return LanguageConfig{}, err
+	}
+	if currentIdx >= 0 {
+		until := now
+		s.configs[currentIdx].Status = StatusSuperseded
+		s.configs[currentIdx].EffectiveUntil = &until
+	}
 	s.configs = append(s.configs, cfg)
 	if input.IdempotencyKey != "" {
 		s.idempo[input.IdempotencyKey] = cfg.ID
 	}
+	s.outbox = append(s.outbox, cloneLanguageConfigChangedEvent(event))
 	return cloneConfig(cfg), nil
+}
+
+// LanguageConfigChangeEvents returns immutable copies for offline tests and
+// local adapters. Production publishers use PostgresStore's claim methods.
+func (s *MemoryStore) LanguageConfigChangeEvents() []realtimev1.LanguageConfigChangedEvent {
+	if s == nil {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	events := make([]realtimev1.LanguageConfigChangedEvent, len(s.outbox))
+	for i, event := range s.outbox {
+		events[i] = cloneLanguageConfigChangedEvent(event)
+	}
+	return events
+}
+
+// FailNextLanguageConfigOutbox makes the next config creation fail before it
+// changes active state, exercising the same all-or-nothing contract as the
+// PostgreSQL transaction.
+func (s *MemoryStore) FailNextLanguageConfigOutbox(err error) {
+	if s == nil || err == nil {
+		return
+	}
+	s.mu.Lock()
+	s.failEvent = err
+	s.mu.Unlock()
 }
 
 func (s *MemoryStore) ListConfigs(_ context.Context, query ListConfigsQuery) ([]LanguageConfig, string, error) {
@@ -177,3 +220,5 @@ func cloneConfig(cfg LanguageConfig) LanguageConfig {
 	}
 	return out
 }
+
+var _ Store = (*MemoryStore)(nil)

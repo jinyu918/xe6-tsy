@@ -14,6 +14,7 @@ type CreateConfigInput struct {
 	IdempotencyKey     string // empty means no idempotency key
 	ExpectedVersion    *int   // optional optimistic lock against current active version
 	RequestFingerprint string // hash of the full create request body for idempotent replay
+	TraceID            string // request trace preserved in the durable change event
 }
 
 // ListConfigsQuery pages version history for one session (version DESC).

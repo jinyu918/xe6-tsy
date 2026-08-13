@@ -112,11 +112,12 @@ func (h *Handler) createConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	cfg, err := h.svc.CreateConfig(
+	cfg, err := h.svc.CreateConfigWithTrace(
 		r.Context(),
 		accountID,
 		r.PathValue("id"),
 		r.Header.Get("Idempotency-Key"),
+		requestIDFrom(r),
 		req,
 	)
 	if err != nil {

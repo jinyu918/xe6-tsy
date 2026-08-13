@@ -67,6 +67,30 @@ func TestSpeechRoutingMigrationSchemaContract(t *testing.T) {
 	assertActiveRouteIndex(t, migration)
 }
 
+func TestLanguageConfigOutboxMigrationSchemaContract(t *testing.T) {
+	raw, err := migrationFS.ReadFile("migrations/006_language_config_outbox.sql")
+	if err != nil {
+		t.Fatalf("read language config outbox migration: %v", err)
+	}
+	migration := strings.Join(strings.Fields(string(raw)), " ")
+	for _, fragment := range []string{
+		"CREATE TABLE IF NOT EXISTS language_config_outbox",
+		"language_config_id",
+		"REFERENCES voice_session_language_configs(id) ON DELETE RESTRICT",
+		"event_id",
+		"payload JSONB NOT NULL",
+		"payload_hash BYTEA NOT NULL CHECK (octet_length(payload_hash) = 32)",
+		"CREATE UNIQUE INDEX IF NOT EXISTS language_config_outbox_config_unique",
+		"CREATE UNIQUE INDEX IF NOT EXISTS language_config_outbox_event_unique",
+		"CREATE INDEX IF NOT EXISTS language_config_outbox_pending",
+		"WHERE published_at IS NULL",
+	} {
+		if !strings.Contains(migration, fragment) {
+			t.Errorf("migration is missing %q", fragment)
+		}
+	}
+}
+
 func assertActiveRouteIndex(t *testing.T, migration string) {
 	t.Helper()
 	indexStart := "CREATE UNIQUE INDEX IF NOT EXISTS speech_active_language_pair_route_unique"

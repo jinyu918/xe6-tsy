@@ -4,11 +4,13 @@ package languages
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"testing"
 	"time"
 
+	realtimev1 "github.com/1024XEngineer/xe6-tsy/packages/contracts/realtime/v1"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/oklog/ulid/v2"
@@ -43,6 +45,9 @@ func openTestPool(t *testing.T) *pgxpool.Pool {
 
 func cleanupSession(t *testing.T, pool *pgxpool.Pool, sessionID string) {
 	t.Helper()
+	if _, err := pool.Exec(context.Background(), `DELETE FROM language_config_outbox WHERE session_id = $1`, sessionID); err != nil {
+		t.Fatalf("cleanup language config outbox for %s: %v", sessionID, err)
+	}
 	_, err := pool.Exec(context.Background(),
 		`DELETE FROM voice_session_language_configs WHERE session_id = $1`, sessionID)
 	if err != nil {
@@ -209,6 +214,55 @@ func TestPostgresCreateActiveConfigLifecycle(t *testing.T) {
 	}
 	if items[1].Status != StatusSuperseded || items[1].EffectiveUntil == nil {
 		t.Fatalf("superseded row incomplete: %#v", items[1])
+	}
+}
+
+func TestPostgresCreateActiveConfigPersistsLanguageConfigOutbox(t *testing.T) {
+	pool := openTestPool(t)
+	store := NewPostgresStore(pool, fixedClock{at: time.Date(2026, 8, 13, 4, 0, 0, 0, time.UTC)})
+	ctx := context.Background()
+	sessionID := "vs_lang_it_outbox_001"
+	cleanupSession(t, pool, sessionID)
+
+	created, err := store.CreateActiveConfig(ctx, CreateConfigInput{
+		SessionID: sessionID,
+		LanguagePairs: []LanguagePair{
+			{Source: "zh-CN", Target: "en-US"},
+			{Source: "en-US", Target: "zh-CN"},
+		},
+		CreatedBy: "user_test",
+		TraceID:   "trace-language-config-outbox",
+	})
+	if err != nil {
+		t.Fatalf("CreateActiveConfig() error = %v", err)
+	}
+
+	var (
+		recordID    string
+		payload     []byte
+		publishedAt *time.Time
+	)
+	if err := pool.QueryRow(ctx, `
+SELECT id, payload, published_at
+FROM language_config_outbox
+WHERE language_config_id = $1`, created.ID).Scan(&recordID, &payload, &publishedAt); err != nil {
+		t.Fatalf("read language config outbox: %v", err)
+	}
+	if recordID != "language_config_outbox_"+created.ID {
+		t.Fatalf("record ID = %q", recordID)
+	}
+	if publishedAt != nil {
+		t.Fatalf("published_at = %v, want NULL", publishedAt)
+	}
+	var event realtimev1.LanguageConfigChangedEvent
+	if err := json.Unmarshal(payload, &event); err != nil {
+		t.Fatalf("decode outbox event: %v", err)
+	}
+	if event.EventID != "language-config:"+created.ID ||
+		event.TraceID != "trace-language-config-outbox" ||
+		event.SessionID != sessionID ||
+		event.LanguageConfigVersion != int64(created.Version) {
+		t.Fatalf("outbox event = %#v", event)
 	}
 }
 

@@ -65,6 +65,11 @@ only for target languages whose output routes set `tts_enabled=true`. The
 ordinary `NewService` constructor remains non-strict for existing in-memory
 callers and offline tests.
 
+Migration `006_language_config_outbox.sql` persists one immutable
+`language.config.changed` payload in the same PostgreSQL transaction as each
+new active configuration. This package only establishes the durable producer
+boundary; stream publication and realtime consumption are wired separately.
+
 Migration `005_speech_routing.sql` seeds `legacy-default` ASR/TTS profiles and
 the `en-US` / `zh-CN` route only when both active catalog entries retain source
 and target support. The seed intentionally contains no vendor secrets or
