@@ -17,6 +17,9 @@ func TestLoadProviderConfigDefaultsToOfflineProviders(t *testing.T) {
 	if !config.ASR.ServerVAD {
 		t.Fatal("ASR.ServerVAD default = false, want true")
 	}
+	if config.ASR.SampleRate != 16000 {
+		t.Fatalf("ASR.SampleRate = %d, want 16000", config.ASR.SampleRate)
+	}
 }
 
 func TestLoadProviderConfigReadsQwenSettings(t *testing.T) {
@@ -58,6 +61,7 @@ func TestLoadProviderConfigRejectsInvalidValues(t *testing.T) {
 		{name: "VAD non-finite", values: map[string]string{"ASR_VAD_THRESHOLD": "NaN"}, want: ErrInvalidEnvironmentValue},
 		{name: "silence range", values: map[string]string{"ASR_SILENCE_DURATION_MS": "100"}, want: ErrInvalidEnvironmentValue},
 		{name: "sample rate", values: map[string]string{"ASR_SAMPLE_RATE": "44100"}, want: ErrInvalidEnvironmentValue},
+		{name: "8kHz sample rate", values: map[string]string{"ASR_SAMPLE_RATE": "8000"}, want: ErrInvalidEnvironmentValue},
 		{name: "boolean", values: map[string]string{"LLM_ENABLE_THINKING": "sometimes"}, want: ErrInvalidEnvironmentValue},
 	}
 	for _, test := range tests {
