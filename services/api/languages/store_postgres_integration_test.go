@@ -266,6 +266,78 @@ WHERE language_config_id = $1`, created.ID).Scan(&recordID, &payload, &published
 	}
 }
 
+func TestPostgresLanguageConfigOutboxDispatchLifecycle(t *testing.T) {
+	pool := openTestPool(t)
+	store := NewPostgresStore(pool, nil)
+	ctx := context.Background()
+	sessionID := "vs_lang_it_outbox_dispatch_" + ulid.Make().String()
+	cleanupSession(t, pool, sessionID)
+
+	created, err := store.CreateActiveConfig(ctx, CreateConfigInput{
+		SessionID: sessionID,
+		LanguagePairs: []LanguagePair{
+			{Source: "zh-CN", Target: "en-US"},
+			{Source: "en-US", Target: "zh-CN"},
+		},
+		CreatedBy: "user_test",
+	})
+	if err != nil {
+		t.Fatalf("CreateActiveConfig() error = %v", err)
+	}
+	recordID := "language_config_outbox_" + created.ID
+	if _, err := pool.Exec(ctx, `
+UPDATE language_config_outbox
+SET available_at = CURRENT_TIMESTAMP - INTERVAL '1 second'
+WHERE id = $1`, recordID); err != nil {
+		t.Fatalf("make outbox row eligible: %v", err)
+	}
+
+	claimed, err := store.ClaimLanguageConfigOutbox(ctx, 1)
+	if err != nil {
+		t.Fatalf("ClaimLanguageConfigOutbox() error = %v", err)
+	}
+	if len(claimed) != 1 || claimed[0].ID != recordID || claimed[0].Attempts != 1 {
+		t.Fatalf("claimed records = %#v, want one first-attempt record %q", claimed, recordID)
+	}
+
+	retryAt := time.Now().UTC().Add(time.Hour)
+	if err := store.MarkLanguageConfigOutboxFailed(ctx, recordID, "Valkey unavailable", retryAt); err != nil {
+		t.Fatalf("MarkLanguageConfigOutboxFailed() error = %v", err)
+	}
+	claimed, err = store.ClaimLanguageConfigOutbox(ctx, 1)
+	if err != nil {
+		t.Fatalf("ClaimLanguageConfigOutbox() during retry delay error = %v", err)
+	}
+	if len(claimed) != 0 {
+		t.Fatalf("claimed during retry delay = %#v, want none", claimed)
+	}
+
+	if _, err := pool.Exec(ctx, `
+UPDATE language_config_outbox
+SET available_at = CURRENT_TIMESTAMP - INTERVAL '1 second'
+WHERE id = $1`, recordID); err != nil {
+		t.Fatalf("make failed outbox row eligible: %v", err)
+	}
+	claimed, err = store.ClaimLanguageConfigOutbox(ctx, 1)
+	if err != nil {
+		t.Fatalf("ClaimLanguageConfigOutbox() after retry delay error = %v", err)
+	}
+	if len(claimed) != 1 || claimed[0].ID != recordID || claimed[0].Attempts != 2 {
+		t.Fatalf("reclaimed records = %#v, want second-attempt record %q", claimed, recordID)
+	}
+
+	if err := store.MarkLanguageConfigOutboxPublished(ctx, recordID); err != nil {
+		t.Fatalf("MarkLanguageConfigOutboxPublished() error = %v", err)
+	}
+	claimed, err = store.ClaimLanguageConfigOutbox(ctx, 1)
+	if err != nil {
+		t.Fatalf("ClaimLanguageConfigOutbox() after publication error = %v", err)
+	}
+	if len(claimed) != 0 {
+		t.Fatalf("claimed published records = %#v, want none", claimed)
+	}
+}
+
 func TestPostgresExpectedVersionConflict(t *testing.T) {
 	pool := openTestPool(t)
 	store := NewPostgresStore(pool, nil)

@@ -67,8 +67,13 @@ callers and offline tests.
 
 Migration `006_language_config_outbox.sql` persists one immutable
 `language.config.changed` payload in the same PostgreSQL transaction as each
-new active configuration. This package only establishes the durable producer
-boundary; stream publication and realtime consumption are wired separately.
+new active configuration. When `LINGOW_SESSION_RUNTIME=enabled`, the API
+dispatcher claims pending rows and appends their canonical `payload` field to
+`LINGOW_LANGUAGE_CONFIG_CHANGED_STREAM` (default
+`lingow:language:config:changed`). It sets `published_at` only after Valkey
+accepts the append; failures remain pending with bounded retry delay. A crash
+after `XADD` can create a duplicate stream entry, so realtime consumers must
+deduplicate the stable payload `event_id`.
 
 Migration `005_speech_routing.sql` seeds `legacy-default` ASR/TTS profiles and
 the `en-US` / `zh-CN` route only when both active catalog entries retain source

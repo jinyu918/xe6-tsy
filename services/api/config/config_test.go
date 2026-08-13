@@ -87,6 +87,18 @@ func TestLoadSessionRuntimeReadsModeProjectionStreamConfig(t *testing.T) {
 	}
 }
 
+func TestLoadSessionRuntimeReadsLanguageConfigChangedStream(t *testing.T) {
+	config, err := LoadFrom(mapSessionRuntimeEnv(map[string]string{
+		"LINGOW_LANGUAGE_CONFIG_CHANGED_STREAM": "lingow:language:config:changed:test",
+	}))
+	if err != nil {
+		t.Fatalf("LoadFrom() error = %v", err)
+	}
+	if config.LanguageConfigStream != "lingow:language:config:changed:test" {
+		t.Fatalf("LanguageConfigStream = %q", config.LanguageConfigStream)
+	}
+}
+
 func TestLoadSessionRuntimeRequiresRedis(t *testing.T) {
 	_, err := LoadFrom(mapSessionRuntimeEnv(map[string]string{"REDIS_URL": ""}))
 	if !errors.Is(err, domain.ErrInvalidArgument) {
