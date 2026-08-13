@@ -2,11 +2,13 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	realtimev1 "github.com/1024XEngineer/xe6-tsy/packages/contracts/realtime/v1"
@@ -16,11 +18,13 @@ import (
 	"github.com/1024XEngineer/xe6-tsy/services/realtime-audio/config"
 	"github.com/1024XEngineer/xe6-tsy/services/realtime-audio/controlchannel"
 	"github.com/1024XEngineer/xe6-tsy/services/realtime-audio/controlplane"
+	"github.com/1024XEngineer/xe6-tsy/services/realtime-audio/languageevents"
 	"github.com/1024XEngineer/xe6-tsy/services/realtime-audio/localruntime"
 	realtimemetrics "github.com/1024XEngineer/xe6-tsy/services/realtime-audio/metrics"
 	"github.com/1024XEngineer/xe6-tsy/services/realtime-audio/pipeline"
 	"github.com/1024XEngineer/xe6-tsy/services/realtime-audio/runtime"
 	"github.com/1024XEngineer/xe6-tsy/services/realtime-audio/session"
+	"github.com/1024XEngineer/xe6-tsy/services/realtime-audio/speech"
 	"github.com/1024XEngineer/xe6-tsy/services/realtime-audio/translate"
 	"github.com/1024XEngineer/xe6-tsy/services/realtime-audio/tts"
 	"github.com/1024XEngineer/xe6-tsy/services/realtime-audio/vad"
@@ -48,6 +52,65 @@ type processConfig struct {
 	SourceLanguage string
 	TargetLanguage string
 	MetricsToken   string
+}
+
+// controlPlaneRuntime groups the HTTP handler with resources that must outlive
+// individual requests. Production startup owns this object so background
+// language-config preparation stops before its Valkey, outbox, and database
+// dependencies are released.
+type controlPlaneRuntime struct {
+	Handler   http.Handler
+	resources *controlPlaneResources
+
+	closeOnce sync.Once
+	closeErr  error
+}
+
+type controlPlaneResources struct {
+	languageRuntime interface{ Close() error }
+	languageCancel  context.CancelFunc
+	languageDone    <-chan struct{}
+	outbox          interface{ Close() error }
+	closePool       func()
+}
+
+// Close uses the required dependency order: consumer cancellation and pending
+// binding settlement, consumer Valkey client, realtime outbox, then PostgreSQL.
+func (r *controlPlaneRuntime) Close(ctx context.Context) error {
+	if r == nil {
+		return nil
+	}
+	r.closeOnce.Do(func() {
+		r.closeErr = r.resources.Close(ctx)
+	})
+	return r.closeErr
+}
+
+func (r *controlPlaneResources) Close(ctx context.Context) error {
+	if r == nil {
+		return nil
+	}
+	var closeErr error
+	if r.languageCancel != nil {
+		r.languageCancel()
+	}
+	if r.languageDone != nil {
+		select {
+		case <-r.languageDone:
+		case <-ctx.Done():
+			closeErr = errors.Join(closeErr, ctx.Err())
+		}
+	}
+	if r.languageRuntime != nil {
+		closeErr = errors.Join(closeErr, r.languageRuntime.Close())
+	}
+	if r.outbox != nil {
+		closeErr = errors.Join(closeErr, r.outbox.Close())
+	}
+	if r.closePool != nil {
+		r.closePool()
+	}
+	return closeErr
 }
 
 func loadProcessConfig(getenv func(string) string) (processConfig, error) {
@@ -126,6 +189,23 @@ func newControlPlaneHandler(ticketSecret string) (http.Handler, error) {
 }
 
 func newControlPlaneHandlerWithConfig(cfg processConfig) (http.Handler, error) {
+	application, err := newControlPlaneRuntimeWithConfig(context.Background(), cfg)
+	if err != nil {
+		return nil, err
+	}
+	return application.Handler, nil
+}
+
+func newControlPlaneRuntimeWithConfig(ctx context.Context, cfg processConfig) (application *controlPlaneRuntime, returnErr error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	resources := &controlPlaneResources{}
+	defer func() {
+		if returnErr != nil {
+			_ = resources.Close(context.Background())
+		}
+	}()
 	now := func() time.Time { return time.Now().UTC() }
 
 	codec, err := realtimev1.NewHMACTicketCodec(realtimev1.TicketConfig{
@@ -174,17 +254,20 @@ func newControlPlaneHandlerWithConfig(cfg processConfig) (http.Handler, error) {
 	var sessions session.SessionReader = localruntime.TrustSessionReader{}
 	var durableFinalTurns recordsv1.FinalTurnSink
 	var fallbackReplays controlplane.FallbackPlaybackReplayStore
+	var speechCatalogLoader *localruntime.PostgresSpeechCatalogLoader
 	if apiDatabaseEnabled(os.Getenv) {
 		databaseURL := strings.TrimSpace(os.Getenv("DATABASE_URL"))
 		if databaseURL == "" {
 			return nil, fmt.Errorf("REALTIME_API_DATABASE is enabled but DATABASE_URL is empty")
 		}
-		pool, err := pgxpool.New(context.Background(), databaseURL)
+		pool, err := pgxpool.New(ctx, databaseURL)
 		if err != nil {
 			return nil, fmt.Errorf("open DATABASE_URL for realtime records: %w", err)
 		}
-		if err := pool.Ping(context.Background()); err != nil {
+		resources.closePool = pool.Close
+		if err := pool.Ping(ctx); err != nil {
 			pool.Close()
+			resources.closePool = nil
 			return nil, fmt.Errorf("ping DATABASE_URL for realtime records: %w", err)
 		}
 		slog.Info("realtime-audio linked to API database",
@@ -193,12 +276,10 @@ func newControlPlaneHandlerWithConfig(cfg processConfig) (http.Handler, error) {
 			"language_reader", "postgres",
 		)
 		sessions = localruntime.PostgresSessionReader{Pool: pool}
-		languages = localruntime.FallbackLanguageConfigReader{
-			Primary:  localruntime.PostgresLanguageConfigReader{Pool: pool, Now: now},
-			Fallback: staticLanguages,
-		}
+		languages = localruntime.PostgresLanguageConfigReader{Pool: pool, Now: now}
 		durableFinalTurns = pipeline.NewPostgresFinalTurnSink(pool)
 		fallbackReplays = localruntime.PostgresFallbackPlaybackReplayStore{Pool: pool}
+		speechCatalogLoader = localruntime.NewPostgresSpeechCatalogLoader(pool)
 	}
 
 	metricRegistry := realtimemetrics.Default()
@@ -211,6 +292,7 @@ func newControlPlaneHandlerWithConfig(cfg processConfig) (http.Handler, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open realtime outbox: %w", err)
 	}
+	resources.outbox = sinks.Outbox
 	var usage pipeline.UsageFactSink = &localruntime.MemoryUsageSink{}
 	if usageOutboxEnabled(os.Getenv) {
 		usage = sinks.Usage
@@ -225,6 +307,27 @@ func newControlPlaneHandlerWithConfig(cfg processConfig) (http.Handler, error) {
 	// Local Silero (or energy) VAD owns utterance cuts; disable Qwen server_vad unless set.
 	if strings.TrimSpace(os.Getenv("ASR_SERVER_VAD")) == "" {
 		providerConfig.ASR.ServerVAD = false
+	}
+	var speechBindings *speech.BindingCoordinator
+	if speechCatalogLoader != nil {
+		catalog, err := speechCatalogLoader.LoadSpeechCatalog(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("load speech catalog: %w", err)
+		}
+		var registry *speech.ProviderRegistry
+		var resolver speech.RouteResolver
+		if cfg.ForceMockTTS {
+			registry, resolver, err = localruntime.BuildSpeechRegistryWithMockTTS(catalog, providerConfig)
+		} else {
+			registry, resolver, err = localruntime.BuildSpeechRegistry(catalog, providerConfig)
+		}
+		if err != nil {
+			return nil, fmt.Errorf("build speech registry: %w", err)
+		}
+		speechBindings, err = speech.NewBindingCoordinator(registry, resolver)
+		if err != nil {
+			return nil, fmt.Errorf("create speech binding coordinator: %w", err)
+		}
 	}
 
 	var audioSink pipeline.AudioChunkSink = localruntime.DiscardAudioSink{}
@@ -253,7 +356,7 @@ func newControlPlaneHandlerWithConfig(cfg processConfig) (http.Handler, error) {
 		playbackInterrupter = candidate
 	}
 
-	manager, err := runtime.NewManager(providerConfig, mockOfflineProviders(cfg.SourceLanguage), runtime.Dependencies{
+	managerDependencies := runtime.Dependencies{
 		FrameSources: localruntime.WebRTCFrameSources{
 			Media:          connections,
 			SourceLanguage: cfg.SourceLanguage,
@@ -280,12 +383,21 @@ func newControlPlaneHandlerWithConfig(cfg processConfig) (http.Handler, error) {
 		Lifecycle:           metricRegistry,
 		ModeCommands:        metricRegistry,
 		Now:                 now,
-	})
+	}
+	if speechBindings != nil {
+		managerDependencies.SpeechBindings = speechBindings
+	}
+	manager, err := runtime.NewManager(providerConfig, mockOfflineProviders(cfg.SourceLanguage), managerDependencies)
 	if err != nil {
 		return nil, fmt.Errorf("configure runtime manager: %w", err)
 	}
 	if err := controlHandler.SetModeControl(manager); err != nil {
 		return nil, fmt.Errorf("configure WebRTC control channel: %w", err)
+	}
+	if speechBindings != nil {
+		if err := resources.startLanguageConfigConsumer(ctx, speechBindings); err != nil {
+			return nil, err
+		}
 	}
 
 	lifecycle, err := session.NewLifecycleService(session.Dependencies{
@@ -326,7 +438,31 @@ func newControlPlaneHandlerWithConfig(cfg processConfig) (http.Handler, error) {
 	mux := http.NewServeMux()
 	realtimemetrics.Register(mux, metricRegistry, cfg.MetricsToken)
 	mux.Handle("/", handler)
-	return mux, nil
+	return &controlPlaneRuntime{Handler: mux, resources: resources}, nil
+}
+
+func (r *controlPlaneResources) startLanguageConfigConsumer(ctx context.Context, bindings *speech.BindingCoordinator) error {
+	streamRuntime, err := languageevents.OpenRuntimeFromEnv(ctx)
+	if err != nil {
+		return fmt.Errorf("open language config event consumer: %w", err)
+	}
+	r.languageRuntime = streamRuntime
+	consumer, err := languageevents.NewConsumer(streamRuntime.Stream, bindings, slog.Default())
+	if err != nil {
+		return fmt.Errorf("create language config event consumer: %w", err)
+	}
+	consumerCtx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	r.languageCancel = cancel
+	r.languageDone = done
+	go func() {
+		defer close(done)
+		if err := consumer.Run(consumerCtx); err != nil {
+			slog.Error("language config event consumer stopped", "error", err)
+		}
+	}()
+	slog.Info("language config event consumer started")
+	return nil
 }
 
 func apiDatabaseEnabled(getenv func(string) string) bool {
