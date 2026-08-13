@@ -22,7 +22,7 @@ func TestAssistantHandlerPublishesReplyUsageAndSpeech(t *testing.T) {
 	replies := &recordingAssistantReplySink{}
 	usage := &recordingUsageSink{}
 	ttsProvider := tts.NewFakeProvider(tts.FakeProviderConfig{
-		Chunks: []tts.AudioChunk{{SequenceNo: 1, Data: []byte{1, 2}}},
+		Chunks: []tts.AudioChunk{{SequenceNo: 1, Encoding: "pcm_s16le", SampleRate: 24000, Channels: 1, Data: []byte{1, 2}}},
 		Result: tts.Result{Provider: "mock-tts", Model: "tts-v1", AudioDuration: time.Second},
 	})
 	handler, runtime := newTestAssistantHandlerWithRuntime(llm, replies, usage, ttsProvider, acceptingAssistantReplyGate{}, base)

@@ -30,7 +30,10 @@ func TestSpeechOutputRejectsEmptyPlaybackID(t *testing.T) {
 func TestPipelineFinalFlowCarriesTurnID(t *testing.T) {
 	translator := &translate.FakeProvider{Result: translate.Result{Text: "hello", Provider: "mock-translate", Model: "v1", InputTokens: 2, OutputTokens: 1}}
 	ttsProvider := tts.NewFakeProvider(tts.FakeProviderConfig{
-		Chunks: []tts.AudioChunk{{SequenceNo: 1, Data: []byte{1, 2}}, {SequenceNo: 2, Data: []byte{3}}},
+		Chunks: []tts.AudioChunk{
+			{SequenceNo: 1, Encoding: "pcm_s16le", SampleRate: 24000, Channels: 1, Data: []byte{1, 2}},
+			{SequenceNo: 2, Encoding: "pcm_s16le", SampleRate: 24000, Channels: 1, Data: []byte{3, 0}},
+		},
 		Result: tts.Result{Provider: "mock-tts", Model: "v1", AudioDuration: 250 * time.Millisecond},
 	})
 	finalSink := &recordingFinalSink{}
@@ -442,7 +445,9 @@ func TestPipelineTTSFailureReportsAcceptedFinalTurn(t *testing.T) {
 		{
 			name:      "audio",
 			wantErr:   audioErr,
-			config:    tts.FakeProviderConfig{Chunks: []tts.AudioChunk{{SequenceNo: 1, Data: []byte{1}}}},
+			config: tts.FakeProviderConfig{Chunks: []tts.AudioChunk{
+				{SequenceNo: 1, Encoding: "pcm_s16le", SampleRate: 24000, Channels: 1, Data: []byte{1, 0}},
+			}},
 			usageSink: &recordingUsageSink{},
 			audioSink: &recordingAudioSink{err: audioErr},
 		},
@@ -601,7 +606,7 @@ func TestPipelineCompletesPlaybackAfterTTSFinishes(t *testing.T) {
 	service := newTestPipelineService(PipelineDependencies{
 		Translator: &translate.FakeProvider{Result: translate.Result{Text: "hello", Provider: "mock-translate", Model: "v1"}},
 		TTS: tts.NewFakeProvider(tts.FakeProviderConfig{
-			Chunks: []tts.AudioChunk{{SequenceNo: 1, Data: []byte{1, 2}}},
+			Chunks: []tts.AudioChunk{{SequenceNo: 1, Encoding: "pcm_s16le", SampleRate: 24000, Channels: 1, Data: []byte{1, 2}}},
 			Result: tts.Result{Provider: "mock-tts", Model: "v1"},
 		}),
 		FinalTurns: &recordingFinalSink{}, Usage: &recordingUsageSink{}, Audio: audioSink, Runtime: &recordingRuntimeReporter{},
@@ -618,7 +623,7 @@ func TestPipelinePlaysFallbackWithoutPublishingAnotherFinalTurn(t *testing.T) {
 	finalSink := &recordingFinalSink{}
 	usageSink := &recordingUsageSink{}
 	ttsProvider := tts.NewFakeProvider(tts.FakeProviderConfig{
-		Chunks: []tts.AudioChunk{{SequenceNo: 1, Data: []byte{1, 2}}},
+		Chunks: []tts.AudioChunk{{SequenceNo: 1, Encoding: "pcm_s16le", SampleRate: 24000, Channels: 1, Data: []byte{1, 2}}},
 		Result: tts.Result{Provider: "mock-tts", Model: "v1"},
 	})
 	service := newTestPipelineService(PipelineDependencies{
@@ -659,7 +664,7 @@ func TestPipelineMarksPrePlaybackFallbackFailures(t *testing.T) {
 			svc: newTestPipelineService(PipelineDependencies{
 				Translator: &translate.FakeProvider{Result: translate.Result{Text: "hello"}},
 				TTS: tts.NewFakeProvider(tts.FakeProviderConfig{
-					Chunks: []tts.AudioChunk{{SequenceNo: 1, Data: []byte{1, 2}}},
+					Chunks: []tts.AudioChunk{{SequenceNo: 1, Encoding: "pcm_s16le", SampleRate: 24000, Channels: 1, Data: []byte{1, 2}}},
 				}),
 				FinalTurns: &recordingFinalSink{}, Usage: &recordingUsageSink{}, Audio: &recordingAudioSink{},
 				Runtime: stateFailingRuntimeReporter{failState: session.RuntimeTTSProcessing, err: errors.New("runtime unavailable")},
@@ -717,7 +722,7 @@ func TestPipelineCancelsPlaybackAfterTTSError(t *testing.T) {
 	service := newTestPipelineService(PipelineDependencies{
 		Translator: &translate.FakeProvider{Result: translate.Result{Text: "hello", Provider: "mock-translate", Model: "v1"}},
 		TTS: tts.NewFakeProvider(tts.FakeProviderConfig{
-			Chunks: []tts.AudioChunk{{SequenceNo: 1, Data: []byte{1, 2}}}, FinishErr: wantErr,
+			Chunks: []tts.AudioChunk{{SequenceNo: 1, Encoding: "pcm_s16le", SampleRate: 24000, Channels: 1, Data: []byte{1, 2}}}, FinishErr: wantErr,
 		}),
 		FinalTurns: &recordingFinalSink{}, Usage: &recordingUsageSink{}, Audio: audioSink, Runtime: &recordingRuntimeReporter{},
 	})

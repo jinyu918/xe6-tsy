@@ -226,6 +226,9 @@ func (o *SpeechOutput) publishChunks(ctx context.Context, request SpeechOutputRe
 			if !ok {
 				return playing, nil
 			}
+			if err := chunk.ValidateCanonicalPCM(); err != nil {
+				return playing, fmt.Errorf("validate TTS audio chunk: %w", err)
+			}
 			if !playing {
 				// A created stream becomes externally visible only with its first audio chunk.
 				if err := o.reportRuntime(ctx, request.Turn, session.RuntimePlaying, request.PlaybackID); err != nil {
@@ -235,7 +238,8 @@ func (o *SpeechOutput) publishChunks(ctx context.Context, request SpeechOutputRe
 			}
 			if err := o.audio.Publish(ctx, AudioChunk{
 				SessionID: request.Turn.SessionID, TurnID: request.Turn.ID, PlaybackID: request.PlaybackID,
-				SequenceNo: chunk.SequenceNo, Encoding: chunk.Encoding, Data: append([]byte(nil), chunk.Data...),
+				SequenceNo: chunk.SequenceNo, Encoding: chunk.Encoding, SampleRate: chunk.SampleRate,
+				Channels: chunk.Channels, Data: append([]byte(nil), chunk.Data...),
 			}); err != nil {
 				return playing, fmt.Errorf("publish audio chunk: %w", err)
 			}

@@ -436,7 +436,7 @@ func mockOfflineProviders(sourceLanguage string) config.Providers {
 			Result: translate.Result{Text: translated, Provider: "mock-llm", Model: "fake"},
 		},
 		TTS: tts.NewFakeProvider(tts.FakeProviderConfig{
-			Chunks: []tts.AudioChunk{{SequenceNo: 1, Data: []byte{0, 0, 0, 0}}},
+			Chunks: []tts.AudioChunk{{SequenceNo: 1, Data: []byte{0, 0, 0, 0}, SampleRate: 24000, Channels: 1, Encoding: "pcm_s16le"}},
 			Result: tts.Result{Provider: "mock-tts", Model: "fake"},
 		}),
 	}

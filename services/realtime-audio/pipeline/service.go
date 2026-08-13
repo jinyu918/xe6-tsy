@@ -31,6 +31,8 @@ type AudioChunk struct {
 	PlaybackID string
 	SequenceNo int64
 	Encoding   string
+	SampleRate int
+	Channels   int
 	Data       []byte
 }
 
