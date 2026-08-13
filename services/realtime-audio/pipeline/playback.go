@@ -21,6 +21,7 @@ type FallbackPlayback struct {
 	TargetLanguage        string
 	TranslatedText        string
 	LanguageConfigVersion int64
+	TTSProfileID          string
 	PlaybackID            string
 }
 
@@ -108,12 +109,25 @@ func (o *SpeechOutput) withTTS(provider tts.Provider, voiceID, providerLabel str
 // PlayFallback synthesizes one previously persisted translation without
 // translating or publishing another FinalTurn.
 func (s *PipelineService) PlayFallback(ctx context.Context, input FallbackPlayback) (returnErr error) {
-	if s == nil || s.speech == nil || s.usage == nil || s.runtime == nil {
+	if s == nil || s.speech == nil || s.usage == nil || s.runtime == nil || s.fallbackTTS == nil {
 		return MarkFallbackPlaybackNotStarted(ErrPipelineDependencyRequired)
 	}
 	if input.SessionID == "" || input.TurnID == "" || input.AccountID == "" || input.TraceID == "" ||
-		input.TargetLanguage == "" || input.TranslatedText == "" || input.LanguageConfigVersion < 1 || input.PlaybackID == "" {
+		input.TargetLanguage == "" || input.TranslatedText == "" || input.LanguageConfigVersion < 1 ||
+		strings.TrimSpace(input.TTSProfileID) == "" || input.PlaybackID == "" {
 		return MarkFallbackPlaybackNotStarted(ErrPipelineDependencyRequired)
+	}
+	ttsProvider, err := s.fallbackTTS.TTS(input.TTSProfileID)
+	if err != nil {
+		return MarkFallbackPlaybackNotStarted(fmt.Errorf("resolve fallback TTS profile: %w", err))
+	}
+	ttsProfile, err := s.fallbackTTS.TTSProfile(input.TTSProfileID)
+	if err != nil {
+		return MarkFallbackPlaybackNotStarted(fmt.Errorf("resolve fallback TTS profile metadata: %w", err))
+	}
+	speechOutput := s.speech.withTTS(ttsProvider, ttsProfile.Voice, ttsProfile.Provider)
+	if err := speechOutput.validate(); err != nil {
+		return MarkFallbackPlaybackNotStarted(err)
 	}
 	turn := TurnContext{
 		ID: input.TurnID, SessionID: input.SessionID, AccountID: input.AccountID,
@@ -127,7 +141,7 @@ func (s *PipelineService) PlayFallback(ctx context.Context, input FallbackPlayba
 			returnErr = errors.Join(returnErr, fmt.Errorf("restore listening runtime: %w", err))
 		}
 	}()
-	ttsResult, err := s.speech.Play(ctx, SpeechOutputRequest{
+	ttsResult, err := speechOutput.Play(ctx, SpeechOutputRequest{
 		Turn: turn, Language: input.TargetLanguage, Text: input.TranslatedText, PlaybackID: input.PlaybackID,
 	})
 	if err != nil {

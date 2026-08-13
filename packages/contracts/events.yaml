@@ -273,6 +273,12 @@ components:
           format: int64
           minimum: 1
           description: The version fixed by realtime at the start of this turn. It is required for every new event.
+        asr_profile_id:
+          type: [string, 'null']
+          minLength: 1
+        tts_profile_id:
+          type: [string, 'null']
+          minLength: 1
         source_text:
           type: string
           minLength: 1

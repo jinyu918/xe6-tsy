@@ -47,6 +47,39 @@ func TestAutomaticPostgresReadQueries(t *testing.T) {
 	}
 }
 
+func TestAutomaticPostgresReadQueriesKeepLegacyNullTTSProfileUnknown(t *testing.T) {
+	runValues := automaticRunValues(testAutomaticRun())
+	runValues[7] = (*string)(nil)
+	pool := &automaticPostgresPoolFake{
+		rows: []*automaticRowsFake{
+			{rows: [][]any{runValues}},
+			{},
+			{rows: [][]any{runValues}},
+		},
+		row: []*automaticRowFake{{values: runValues}},
+	}
+	repository := &PostgresRepository{pool: pool}
+	if got, err := repository.GetAutomaticTurnRun(t.Context(), "account-1", "turn-1"); err != nil || got.TTSProfileID != nil {
+		t.Fatalf("GetAutomaticTurnRun() TTS profile = %#v, %v; want nil", got.TTSProfileID, err)
+	}
+	if got, err := repository.ListAutomaticTurnRetryCandidates(t.Context(), 5); err != nil || len(got) != 1 || got[0].TTSProfileID != nil {
+		t.Fatalf("ListAutomaticTurnRetryCandidates() = %#v, %v; want nil profile", got, err)
+	}
+	if got, err := repository.ListAutomaticTurnRecoveryCandidates(t.Context(), 5); err != nil || len(got) != 0 {
+		t.Fatalf("ListAutomaticTurnRecoveryCandidates() = %#v, %v; want no legacy recovery candidate", got, err)
+	}
+	if len(pool.queries) < 2 || !strings.Contains(pool.queries[1], "NULLIF(BTRIM(tts_profile_id), '') IS NOT NULL") {
+		t.Fatalf("recovery candidate query = %#v, want non-empty TTS profile filter", pool.queries)
+	}
+	if got, err := repository.ListAutomaticTurnRestoreCandidates(t.Context(), 5); err != nil || len(got) != 1 || got[0].TTSProfileID != nil {
+		t.Fatalf("ListAutomaticTurnRestoreCandidates() = %#v, %v; want nil profile", got, err)
+	}
+	claimPool := &automaticPostgresPoolFake{tx: &automaticTxFake{row: []*automaticRowFake{{values: runValues}}}}
+	if _, _, err := (&PostgresRepository{pool: claimPool}).ClaimAutomaticTurnFallback(t.Context(), "account-1", "turn-1"); !errors.Is(err, domain.ErrConflict) {
+		t.Fatalf("ClaimAutomaticTurnFallback() error = %v, want conflict for legacy profile", err)
+	}
+}
+
 func TestAutomaticPostgresRetryCandidatesExcludeTotalFailures(t *testing.T) {
 	pool := &automaticPostgresPoolFake{rows: []*automaticRowsFake{{}}}
 	if _, err := (&PostgresRepository{pool: pool}).ListAutomaticTurnRetryCandidates(t.Context(), 5); err != nil {
@@ -134,6 +167,16 @@ func TestAutomaticPostgresScheduleIsIdempotentAndDetectsConflict(t *testing.T) {
 	}}
 	if err := (&PostgresRepository{pool: conflictPool}).ScheduleAutomaticTurn(t.Context(), record); !errors.Is(err, domain.ErrConflict) {
 		t.Fatalf("conflicting replay ScheduleAutomaticTurn() error = %v, want conflict", err)
+	}
+	profileConflict := run
+	profileID := "tts_profile_02"
+	profileConflict.TTSProfileID = &profileID
+	profileConflictPool := &automaticPostgresPoolFake{tx: &automaticTxFake{
+		execTags: []pgconn.CommandTag{pgconn.NewCommandTag("INSERT 0 0")},
+		row:      []*automaticRowFake{{values: automaticRunValues(profileConflict)}},
+	}}
+	if err := (&PostgresRepository{pool: profileConflictPool}).ScheduleAutomaticTurn(t.Context(), record); !errors.Is(err, domain.ErrConflict) {
+		t.Fatalf("TTS-profile-conflicting replay error = %v, want conflict", err)
 	}
 }
 
@@ -307,13 +350,14 @@ func testAutomaticRun() AutomaticTurnRun {
 	return AutomaticTurnRun{
 		AccountID: "account-1", TurnID: "turn-1", SessionID: "session-1", TraceID: "trace-1",
 		TargetLanguage: "zh-CN", TranslatedText: "译文", LanguageConfigVersion: 3,
-		Status: AutomaticTurnRunFailed, TargetCount: 1, SettledCount: 1, FailedCount: 1,
+		TTSProfileID: stringPointer("tts_profile_01"),
+		Status:       AutomaticTurnRunFailed, TargetCount: 1, SettledCount: 1, FailedCount: 1,
 		FallbackOperationID: "fallback-turn-1", CreatedAt: now, UpdatedAt: now,
 	}
 }
 
 func automaticRunValues(run AutomaticTurnRun) []any {
-	return []any{run.AccountID, run.TurnID, run.SessionID, run.TraceID, run.TargetLanguage, run.TranslatedText, run.LanguageConfigVersion, run.Status, run.TargetCount, run.SettledCount, run.SucceededCount, run.FailedCount, run.FallbackOperationID, run.CreatedAt, run.UpdatedAt}
+	return []any{run.AccountID, run.TurnID, run.SessionID, run.TraceID, run.TargetLanguage, run.TranslatedText, run.LanguageConfigVersion, run.TTSProfileID, run.Status, run.TargetCount, run.SettledCount, run.SucceededCount, run.FailedCount, run.FallbackOperationID, run.CreatedAt, run.UpdatedAt}
 }
 
 func automaticSettlementValues(settlement AutomaticTurnSettlement) []any {

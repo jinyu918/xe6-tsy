@@ -47,6 +47,8 @@ func (w *TurnWriter) StoreFinalTurn(ctx context.Context, event recordsv1.FinalTu
 		event.SourceLanguage,
 		event.TargetLanguage,
 		event.LanguageConfigVersion,
+		event.ASRProfileID,
+		event.TTSProfileID,
 		event.SourceText,
 		event.TranslatedText,
 		event.SpeakerConfidence,
@@ -138,13 +140,13 @@ const insertFinalTurnQuery = `
 INSERT INTO voice_turns (
     id, event_id, event_payload_hash, session_id, participant_id,
     speaker_code, display_name, provider_speaker_id, sequence_no, source_language, target_language,
-    language_config_version, source_text, translated_text, speaker_confidence,
+    language_config_version, asr_profile_id, tts_profile_id, source_text, translated_text, speaker_confidence,
     attribution_status, started_at, ended_at, created_at
 ) VALUES (
     $1, $2, $3, $4, $5,
     $6, $7, $8, $9, $10,
-    $11, $12, $13, $14, $15,
-    $16, $17, $18, $19
+    $11, $12, $13, $14, $15, $16, $17,
+    $18, $19, $20, $21
 )
 ON CONFLICT DO NOTHING`
 

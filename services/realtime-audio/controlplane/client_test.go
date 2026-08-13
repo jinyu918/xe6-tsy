@@ -140,7 +140,7 @@ func TestClientPlayFallbackAcceptsIdempotentReceipts(t *testing.T) {
 			}
 			receipt, err := client.PlayFallback(t.Context(), "session-1", realtimev1.FallbackPlaybackRequest{
 				OperationID: "fallback-1", SessionID: "session-1", TurnID: "turn-1", TargetLanguage: "zh-CN",
-				TranslatedText: "translated", LanguageConfigVersion: 3, TraceID: "trace-1",
+				TranslatedText: "translated", LanguageConfigVersion: 3, TTSProfileID: "tts_profile_01", TraceID: "trace-1",
 			})
 			if err != nil || receipt.Status != status {
 				t.Fatalf("PlayFallback() = %#v, %v", receipt, err)
@@ -152,7 +152,7 @@ func TestClientPlayFallbackAcceptsIdempotentReceipts(t *testing.T) {
 func TestClientPlayFallbackValidatesSnapshotAndTicket(t *testing.T) {
 	valid := realtimev1.FallbackPlaybackRequest{
 		OperationID: "fallback-1", SessionID: "session-1", TurnID: "turn-1", TargetLanguage: "zh-CN",
-		TranslatedText: "translated", LanguageConfigVersion: 3, TraceID: "trace-1",
+		TranslatedText: "translated", LanguageConfigVersion: 3, TTSProfileID: "tts_profile_01", TraceID: "trace-1",
 	}
 	client := newTestClient(t, "https://realtime.example")
 	tests := []struct {
@@ -204,7 +204,7 @@ func TestClientPlayFallbackRejectsInvalidReceipt(t *testing.T) {
 			defer server.Close()
 			_, err := newTestClient(t, server.URL).PlayFallback(t.Context(), "session-1", realtimev1.FallbackPlaybackRequest{
 				OperationID: "fallback-1", SessionID: "session-1", TurnID: "turn-1", TargetLanguage: "zh-CN",
-				TranslatedText: "translated", LanguageConfigVersion: 3, TraceID: "trace-1",
+				TranslatedText: "translated", LanguageConfigVersion: 3, TTSProfileID: "tts_profile_01", TraceID: "trace-1",
 			})
 			if !errors.Is(err, ErrInvalidResponse) {
 				t.Fatalf("PlayFallback() error = %v, want ErrInvalidResponse", err)

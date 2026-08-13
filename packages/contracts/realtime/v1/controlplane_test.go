@@ -68,6 +68,7 @@ func TestFallbackPlaybackRequestCarriesImmutableTurnSnapshot(t *testing.T) {
 		TargetLanguage:        "zh-CN",
 		TranslatedText:        "translated text",
 		LanguageConfigVersion: 3,
+		TTSProfileID:          "tts_profile_01",
 		TraceID:               "trace-1",
 	})
 	if err != nil {
@@ -80,6 +81,7 @@ func TestFallbackPlaybackRequestCarriesImmutableTurnSnapshot(t *testing.T) {
 		`"target_language":"zh-CN"`,
 		`"translated_text":"translated text"`,
 		`"language_config_version":3`,
+		`"tts_profile_id":"tts_profile_01"`,
 		`"trace_id":"trace-1"`,
 	} {
 		if !strings.Contains(string(encoded), field) {
@@ -245,7 +247,7 @@ func TestOpenAPIControlPlaneErrorContract(t *testing.T) {
 		t.Fatalf("Fallback playback 202 schema ref = %q", got)
 	}
 	fallbackSchema := spec.Components.Schemas["FallbackPlaybackRequest"]
-	wantFallbackFields := []string{"operation_id", "session_id", "turn_id", "target_language", "translated_text", "language_config_version", "trace_id"}
+	wantFallbackFields := []string{"operation_id", "session_id", "turn_id", "target_language", "translated_text", "language_config_version", "tts_profile_id", "trace_id"}
 	if !reflect.DeepEqual(fallbackSchema.Required, wantFallbackFields) {
 		t.Fatalf("FallbackPlaybackRequest required = %v, want %v", fallbackSchema.Required, wantFallbackFields)
 	}

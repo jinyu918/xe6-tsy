@@ -356,13 +356,19 @@ func TestManagerPlaysFallbackThroughActiveSession(t *testing.T) {
 	deps := testDependencies(source, &fakeLanguageReader{snapshot: activeConfig("session-1")})
 	deps.Audio = audioSink
 	deps.Usage = usageSink
+	defaultTTS := tts.NewFakeProvider(tts.FakeProviderConfig{
+		Chunks: []tts.AudioChunk{{SequenceNo: 1, Data: []byte{9, 9}}},
+		Result: tts.Result{Provider: "current-tts", Model: "v1"},
+	})
+	historicalTTS := tts.NewFakeProvider(tts.FakeProviderConfig{
+		Chunks: []tts.AudioChunk{{SequenceNo: 1, Data: []byte{1, 2}}},
+		Result: tts.Result{Provider: "historical-tts", Model: "v2"},
+	})
+	deps.SpeechProviders = mustFallbackTTSRegistry(t, historicalTTS)
 	manager, err := NewManager(config.ProviderConfig{}, config.Providers{
 		ASR:         asr.NewFakeProvider(asr.FakeProviderConfig{}),
 		Translation: &translate.FakeProvider{},
-		TTS: tts.NewFakeProvider(tts.FakeProviderConfig{
-			Chunks: []tts.AudioChunk{{SequenceNo: 1, Data: []byte{1, 2}}},
-			Result: tts.Result{Provider: "mock-tts", Model: "v1"},
-		}),
+		TTS:         defaultTTS,
 	}, deps)
 	if err != nil {
 		t.Fatalf("NewManager() error = %v", err)
@@ -378,7 +384,7 @@ func TestManagerPlaysFallbackThroughActiveSession(t *testing.T) {
 
 	err = manager.PlayFallback(t.Context(), realtimev1.FallbackPlaybackRequest{
 		OperationID: "fallback-1", SessionID: "session-1", TurnID: "turn-1", TargetLanguage: "zh-CN",
-		TranslatedText: "fallback text", LanguageConfigVersion: 3, TraceID: "trace-fallback",
+		TranslatedText: "fallback text", LanguageConfigVersion: 3, TTSProfileID: "tts_profile_01", TraceID: "trace-fallback",
 	})
 	if err != nil {
 		t.Fatalf("PlayFallback() error = %v", err)
@@ -386,12 +392,18 @@ func TestManagerPlaysFallbackThroughActiveSession(t *testing.T) {
 	if len(audioSink.Chunks()) != 1 || len(usageSink.Facts()) != 1 || usageSink.Facts()[0].ServiceType != "tts" {
 		t.Fatalf("fallback sinks = audio %d, usage %#v", len(audioSink.Chunks()), usageSink.Facts())
 	}
+	if requests := defaultTTS.Requests(); len(requests) != 0 {
+		t.Fatalf("default TTS requests = %#v, want fallback to use historical profile", requests)
+	}
+	if requests := historicalTTS.Requests(); len(requests) != 1 || requests[0].VoiceID != "historical-voice" {
+		t.Fatalf("historical TTS requests = %#v", requests)
+	}
 }
 
 func TestManagerPlayFallbackRejectsCanceledOrUnknownSession(t *testing.T) {
 	request := realtimev1.FallbackPlaybackRequest{
 		OperationID: "fallback-1", SessionID: "session-1", TurnID: "turn-1", TargetLanguage: "zh-CN",
-		TranslatedText: "fallback text", LanguageConfigVersion: 3, TraceID: "trace-fallback",
+		TranslatedText: "fallback text", LanguageConfigVersion: 3, TTSProfileID: "tts_profile_01", TraceID: "trace-fallback",
 	}
 	var nilManager *Manager
 	if err := nilManager.PlayFallback(t.Context(), request); !errors.Is(err, ErrDependencyRequired) {
@@ -1273,6 +1285,20 @@ func (r *recordingSpeechBindings) ClosedSessions() []string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return append([]string(nil), r.closed...)
+}
+
+func mustFallbackTTSRegistry(t *testing.T, provider tts.Provider) *speech.ProviderRegistry {
+	t.Helper()
+	registry, err := speech.NewProviderRegistry(nil, []speech.TTSProfile{{
+		Profile: speech.Profile{
+			ID: "tts_profile_01", Provider: "historical-profile", Model: "tts-v2", Voice: "historical-voice",
+		},
+		Adapter: provider,
+	}})
+	if err != nil {
+		t.Fatalf("NewProviderRegistry() error = %v", err)
+	}
+	return registry
 }
 
 func mustFrame(t *testing.T, pcm []byte, capturedAt time.Time) audio.Frame {

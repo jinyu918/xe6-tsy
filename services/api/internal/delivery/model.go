@@ -226,6 +226,7 @@ type AutomaticTurnRun struct {
 	TargetLanguage        string                 `json:"target_language"`
 	TranslatedText        string                 `json:"translated_text"`
 	LanguageConfigVersion int64                  `json:"language_config_version"`
+	TTSProfileID          *string                `json:"tts_profile_id,omitempty"`
 	Status                AutomaticTurnRunStatus `json:"status"`
 	TargetCount           int                    `json:"target_count"`
 	SettledCount          int                    `json:"settled_count"`

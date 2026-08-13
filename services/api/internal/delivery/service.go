@@ -288,7 +288,8 @@ func (u *UseCases) scheduleAutomaticTurnAtomically(ctx context.Context, schedule
 	existing, err := scheduler.GetAutomaticTurnRun(ctx, accountID, event.TurnID)
 	if err == nil {
 		if existing.SessionID != event.SessionID || existing.TraceID != event.TraceID || existing.TargetLanguage != event.TargetLanguage ||
-			existing.TranslatedText != event.TranslatedText || existing.LanguageConfigVersion != event.LanguageConfigVersion {
+			existing.TranslatedText != event.TranslatedText || existing.LanguageConfigVersion != event.LanguageConfigVersion ||
+			!sameOptionalString(existing.TTSProfileID, event.TTSProfileID) {
 			return domain.ErrConflict
 		}
 		return nil
@@ -336,7 +337,8 @@ func (u *UseCases) scheduleAutomaticTurnAtomically(ctx context.Context, schedule
 	run := AutomaticTurnRun{
 		AccountID: accountID, TurnID: event.TurnID, SessionID: event.SessionID, TraceID: event.TraceID,
 		TargetLanguage: event.TargetLanguage, TranslatedText: event.TranslatedText,
-		LanguageConfigVersion: event.LanguageConfigVersion, Status: AutomaticTurnRunPending,
+		LanguageConfigVersion: event.LanguageConfigVersion, TTSProfileID: cloneString(event.TTSProfileID),
+		Status:      AutomaticTurnRunPending,
 		TargetCount: len(targets), FallbackOperationID: "fallback_" + event.TurnID,
 		CreatedAt: now, UpdatedAt: now,
 	}
@@ -420,10 +422,14 @@ func (u *UseCases) RecoverAutomaticTurn(ctx context.Context, accountID, turnID s
 	if !claimed {
 		return nil
 	}
+	if run.TTSProfileID == nil || strings.TrimSpace(*run.TTSProfileID) == "" {
+		return fmt.Errorf("fallback TTS profile unavailable: %w", domain.ErrConflict)
+	}
+	ttsProfileID := strings.TrimSpace(*run.TTSProfileID)
 	_, err = u.fallback.PlayFallback(ctx, run.SessionID, realtimev1.FallbackPlaybackRequest{
 		OperationID: run.FallbackOperationID, SessionID: run.SessionID, TurnID: run.TurnID,
 		TargetLanguage: run.TargetLanguage, TranslatedText: run.TranslatedText,
-		LanguageConfigVersion: int(run.LanguageConfigVersion), TraceID: run.TraceID,
+		LanguageConfigVersion: int(run.LanguageConfigVersion), TTSProfileID: ttsProfileID, TraceID: run.TraceID,
 	})
 	if err != nil {
 		return fmt.Errorf("play automatic fallback: %w", err)
@@ -657,4 +663,11 @@ func cloneString(value *string) *string {
 	}
 	copy := *value
 	return &copy
+}
+
+func sameOptionalString(left, right *string) bool {
+	if left == nil || right == nil {
+		return left == nil && right == nil
+	}
+	return *left == *right
 }

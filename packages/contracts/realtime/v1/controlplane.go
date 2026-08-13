@@ -78,6 +78,7 @@ type FallbackPlaybackRequest struct {
 	TargetLanguage        string `json:"target_language"`
 	TranslatedText        string `json:"translated_text"`
 	LanguageConfigVersion int    `json:"language_config_version"`
+	TTSProfileID          string `json:"tts_profile_id"`
 	TraceID               string `json:"trace_id"`
 }
 

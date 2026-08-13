@@ -10,8 +10,8 @@ func TestEmbeddedMigrations(t *testing.T) {
 	if err != nil {
 		t.Fatalf("embeddedMigrations() error = %v", err)
 	}
-	if len(migrations) != 28 {
-		t.Fatalf("len(embeddedMigrations()) = %d, want 28", len(migrations))
+	if len(migrations) != 30 {
+		t.Fatalf("len(embeddedMigrations()) = %d, want 30", len(migrations))
 	}
 	voiceRecords := migrations[0]
 	if voiceRecords.Version != 1 || voiceRecords.Name != "voice_records" {
@@ -365,6 +365,36 @@ func TestEmbeddedMigrations(t *testing.T) {
 	} {
 		if !strings.Contains(strings.ToLower(modeProjection.SQL), strings.ToLower(expected)) {
 			t.Fatalf("mode projection migration does not contain %q", expected)
+		}
+	}
+
+	finalTurnSpeechProfiles := migrations[28]
+	if finalTurnSpeechProfiles.Version != 29 || finalTurnSpeechProfiles.Name != "final_turn_speech_profiles" {
+		t.Fatalf("migration = %#v, want version 29 final turn speech profiles", finalTurnSpeechProfiles)
+	}
+	for _, expected := range []string{
+		"ADD COLUMN asr_profile_id TEXT",
+		"ADD COLUMN tts_profile_id TEXT",
+		"NEW.asr_profile_id IS DISTINCT FROM OLD.asr_profile_id",
+		"NEW.tts_profile_id IS DISTINCT FROM OLD.tts_profile_id",
+	} {
+		if !strings.Contains(finalTurnSpeechProfiles.SQL, expected) {
+			t.Fatalf("final-turn speech-profile migration does not contain %q", expected)
+		}
+	}
+
+	automaticFallbackTTSProfile := migrations[29]
+	if automaticFallbackTTSProfile.Version != 30 || automaticFallbackTTSProfile.Name != "automatic_turn_fallback_tts_profile" {
+		t.Fatalf("migration = %#v, want version 30 automatic fallback TTS profile", automaticFallbackTTSProfile)
+	}
+	for _, expected := range []string{
+		"ADD COLUMN tts_profile_id TEXT",
+		"automatic_turn_runs_tts_profile_not_empty",
+		"NEW.tts_profile_id IS DISTINCT FROM OLD.tts_profile_id",
+		"CREATE TRIGGER automatic_turn_runs_reject_tts_profile_updates",
+	} {
+		if !strings.Contains(automaticFallbackTTSProfile.SQL, expected) {
+			t.Fatalf("automatic-fallback TTS-profile migration does not contain %q", expected)
 		}
 	}
 }
