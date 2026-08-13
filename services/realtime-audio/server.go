@@ -21,6 +21,7 @@ import (
 	"github.com/1024XEngineer/xe6-tsy/services/realtime-audio/pipeline"
 	"github.com/1024XEngineer/xe6-tsy/services/realtime-audio/runtime"
 	"github.com/1024XEngineer/xe6-tsy/services/realtime-audio/session"
+	"github.com/1024XEngineer/xe6-tsy/services/realtime-audio/speech"
 	"github.com/1024XEngineer/xe6-tsy/services/realtime-audio/translate"
 	"github.com/1024XEngineer/xe6-tsy/services/realtime-audio/tts"
 	"github.com/1024XEngineer/xe6-tsy/services/realtime-audio/vad"
@@ -174,6 +175,8 @@ func newControlPlaneHandlerWithConfig(cfg processConfig) (http.Handler, error) {
 	var sessions session.SessionReader = localruntime.TrustSessionReader{}
 	var durableFinalTurns recordsv1.FinalTurnSink
 	var fallbackReplays controlplane.FallbackPlaybackReplayStore
+	var speechCatalogLoader *localruntime.PostgresSpeechCatalogLoader
+	var speechRouteResolver speech.RouteResolver
 	if apiDatabaseEnabled(os.Getenv) {
 		databaseURL := strings.TrimSpace(os.Getenv("DATABASE_URL"))
 		if databaseURL == "" {
@@ -193,12 +196,11 @@ func newControlPlaneHandlerWithConfig(cfg processConfig) (http.Handler, error) {
 			"language_reader", "postgres",
 		)
 		sessions = localruntime.PostgresSessionReader{Pool: pool}
-		languages = localruntime.FallbackLanguageConfigReader{
-			Primary:  localruntime.PostgresLanguageConfigReader{Pool: pool, Now: now},
-			Fallback: staticLanguages,
-		}
+		languages = localruntime.PostgresLanguageConfigReader{Pool: pool, Now: now}
 		durableFinalTurns = pipeline.NewPostgresFinalTurnSink(pool)
 		fallbackReplays = localruntime.PostgresFallbackPlaybackReplayStore{Pool: pool}
+		speechCatalogLoader = localruntime.NewPostgresSpeechCatalogLoader(pool)
+		speechRouteResolver = localruntime.NewPostgresSpeechRouteResolver(pool)
 	}
 
 	metricRegistry := realtimemetrics.Default()
@@ -225,6 +227,26 @@ func newControlPlaneHandlerWithConfig(cfg processConfig) (http.Handler, error) {
 	// Local Silero (or energy) VAD owns utterance cuts; disable Qwen server_vad unless set.
 	if strings.TrimSpace(os.Getenv("ASR_SERVER_VAD")) == "" {
 		providerConfig.ASR.ServerVAD = false
+	}
+	var speechBindings *speech.BindingCoordinator
+	if speechCatalogLoader != nil {
+		catalog, err := speechCatalogLoader.LoadSpeechCatalog(context.Background())
+		if err != nil {
+			return nil, fmt.Errorf("load speech catalog: %w", err)
+		}
+		var registry *speech.ProviderRegistry
+		if cfg.ForceMockTTS {
+			registry, _, err = localruntime.BuildSpeechRegistryWithMockTTS(catalog, providerConfig)
+		} else {
+			registry, _, err = localruntime.BuildSpeechRegistry(catalog, providerConfig)
+		}
+		if err != nil {
+			return nil, fmt.Errorf("build speech registry: %w", err)
+		}
+		speechBindings, err = speech.NewBindingCoordinator(registry, speechRouteResolver)
+		if err != nil {
+			return nil, fmt.Errorf("create speech binding coordinator: %w", err)
+		}
 	}
 
 	var audioSink pipeline.AudioChunkSink = localruntime.DiscardAudioSink{}
@@ -253,7 +275,7 @@ func newControlPlaneHandlerWithConfig(cfg processConfig) (http.Handler, error) {
 		playbackInterrupter = candidate
 	}
 
-	manager, err := runtime.NewManager(providerConfig, mockOfflineProviders(cfg.SourceLanguage), runtime.Dependencies{
+	managerDependencies := runtime.Dependencies{
 		FrameSources: localruntime.WebRTCFrameSources{
 			Media:          connections,
 			SourceLanguage: cfg.SourceLanguage,
@@ -280,7 +302,11 @@ func newControlPlaneHandlerWithConfig(cfg processConfig) (http.Handler, error) {
 		Lifecycle:           metricRegistry,
 		ModeCommands:        metricRegistry,
 		Now:                 now,
-	})
+	}
+	if speechBindings != nil {
+		managerDependencies.SpeechBindings = speechBindings
+	}
+	manager, err := runtime.NewManager(providerConfig, mockOfflineProviders(cfg.SourceLanguage), managerDependencies)
 	if err != nil {
 		return nil, fmt.Errorf("configure runtime manager: %w", err)
 	}
