@@ -63,7 +63,6 @@ type sessionBindingState struct {
 	latestLanguageKey string
 	active            *preparedBinding
 	pending           *pendingBinding
-	lastFailure       *pendingBinding
 	leases            int
 	closed            bool
 }
@@ -149,11 +148,6 @@ func (c *BindingCoordinator) Prepare(
 			c.mu.Unlock()
 			return nil
 		}
-		if state.lastFailure != nil && state.lastFailure.version == languageConfigVersion {
-			result := pendingResultLocked(state.lastFailure)
-			c.mu.Unlock()
-			return result
-		}
 		if state.pending != nil {
 			pending := state.pending
 			c.mu.Unlock()
@@ -165,7 +159,6 @@ func (c *BindingCoordinator) Prepare(
 		c.finishPendingLocked(state.pending, ErrBindingSuperseded)
 		state.pending.cancel()
 	}
-	state.lastFailure = nil
 	prepareCtx, cancel := context.WithCancel(ctx)
 	pending := &pendingBinding{
 		version:     languageConfigVersion,
@@ -204,7 +197,6 @@ func (c *BindingCoordinator) Prepare(
 	}
 	if resolveErr != nil {
 		state.pending = nil
-		state.lastFailure = pending
 		c.finishPendingLocked(pending, resolveErr)
 		return resolveErr
 	}
