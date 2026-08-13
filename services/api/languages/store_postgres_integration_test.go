@@ -55,6 +55,14 @@ func cleanupSession(t *testing.T, pool *pgxpool.Pool, sessionID string) {
 	}
 }
 
+func prepareSession(t *testing.T, pool *pgxpool.Pool, sessionID string) {
+	t.Helper()
+	cleanupSession(t, pool, sessionID)
+	t.Cleanup(func() {
+		cleanupSession(t, pool, sessionID)
+	})
+}
+
 func TestPostgresMigrationsAndSupportedLanguages(t *testing.T) {
 	pool := openTestPool(t)
 	store := NewPostgresStore(pool, nil)
@@ -148,7 +156,7 @@ func TestPostgresCreateActiveConfigLifecycle(t *testing.T) {
 	store := NewPostgresStore(pool, fixedClock{at: time.Date(2026, 7, 27, 2, 0, 0, 0, time.UTC)})
 	ctx := context.Background()
 	sessionID := "vs_lang_it_001"
-	cleanupSession(t, pool, sessionID)
+	prepareSession(t, pool, sessionID)
 
 	pairs := []LanguagePair{
 		{Source: "zh-CN", Target: "en-US"},
@@ -222,7 +230,7 @@ func TestPostgresCreateActiveConfigPersistsLanguageConfigOutbox(t *testing.T) {
 	store := NewPostgresStore(pool, fixedClock{at: time.Date(2026, 8, 13, 4, 0, 0, 0, time.UTC)})
 	ctx := context.Background()
 	sessionID := "vs_lang_it_outbox_001"
-	cleanupSession(t, pool, sessionID)
+	prepareSession(t, pool, sessionID)
 
 	created, err := store.CreateActiveConfig(ctx, CreateConfigInput{
 		SessionID: sessionID,
@@ -271,7 +279,7 @@ func TestPostgresLanguageConfigOutboxDispatchLifecycle(t *testing.T) {
 	store := NewPostgresStore(pool, nil)
 	ctx := context.Background()
 	sessionID := "vs_lang_it_outbox_dispatch_" + ulid.Make().String()
-	cleanupSession(t, pool, sessionID)
+	prepareSession(t, pool, sessionID)
 
 	created, err := store.CreateActiveConfig(ctx, CreateConfigInput{
 		SessionID: sessionID,
@@ -343,7 +351,7 @@ func TestPostgresExpectedVersionConflict(t *testing.T) {
 	store := NewPostgresStore(pool, nil)
 	ctx := context.Background()
 	sessionID := "vs_lang_it_002"
-	cleanupSession(t, pool, sessionID)
+	prepareSession(t, pool, sessionID)
 
 	pairs := []LanguagePair{
 		{Source: "zh-CN", Target: "en-US"},
@@ -372,7 +380,7 @@ func TestPostgresIdempotencyKeyLookupAndConflict(t *testing.T) {
 	store := NewPostgresStore(pool, nil)
 	ctx := context.Background()
 	sessionID := "vs_lang_it_003"
-	cleanupSession(t, pool, sessionID)
+	prepareSession(t, pool, sessionID)
 
 	pairs := []LanguagePair{
 		{Source: "zh-CN", Target: "en-US"},
@@ -420,7 +428,7 @@ func TestPostgresConcurrentFirstCreateDifferentIdempotencyKeys(t *testing.T) {
 	pool := openTestPool(t)
 	ctx := context.Background()
 	sessionID := "vs_lang_it_concurrent_001"
-	cleanupSession(t, pool, sessionID)
+	prepareSession(t, pool, sessionID)
 
 	pairsJSON := `[{"source":"zh-CN","target":"en-US"},{"source":"en-US","target":"zh-CN"}]`
 
