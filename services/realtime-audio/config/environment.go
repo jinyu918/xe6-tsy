@@ -133,6 +133,12 @@ func LoadProviderConfig(lookup LookupEnv) (ProviderConfig, error) {
 	if err != nil {
 		return ProviderConfig{}, err
 	}
+	if ttsSampleRate != 0 && ttsSampleRate != audio.TTSSampleRate {
+		return ProviderConfig{}, invalidValue("TTS_SAMPLE_RATE", value(lookup, "TTS_SAMPLE_RATE"))
+	}
+	if ttsSampleRate == 0 {
+		ttsSampleRate = audio.TTSSampleRate
+	}
 	ttsTimeout, err := readMilliseconds(lookup, "TTS_TIMEOUT_MS")
 	if err != nil {
 		return ProviderConfig{}, err

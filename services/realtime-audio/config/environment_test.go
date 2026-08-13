@@ -62,6 +62,7 @@ func TestLoadProviderConfigRejectsInvalidValues(t *testing.T) {
 		{name: "silence range", values: map[string]string{"ASR_SILENCE_DURATION_MS": "100"}, want: ErrInvalidEnvironmentValue},
 		{name: "sample rate", values: map[string]string{"ASR_SAMPLE_RATE": "44100"}, want: ErrInvalidEnvironmentValue},
 		{name: "8kHz sample rate", values: map[string]string{"ASR_SAMPLE_RATE": "8000"}, want: ErrInvalidEnvironmentValue},
+		{name: "TTS sample rate", values: map[string]string{"TTS_SAMPLE_RATE": "16000"}, want: ErrInvalidEnvironmentValue},
 		{name: "boolean", values: map[string]string{"LLM_ENABLE_THINKING": "sometimes"}, want: ErrInvalidEnvironmentValue},
 	}
 	for _, test := range tests {

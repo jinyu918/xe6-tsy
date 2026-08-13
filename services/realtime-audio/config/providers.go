@@ -209,6 +209,9 @@ func buildTTS(config TTSConfig, offline tts.Provider) (tts.Provider, error) {
 		}
 		return offline, nil
 	case ProviderAliyun:
+		if config.SampleRate != 0 && config.SampleRate != audio.TTSSampleRate {
+			return nil, fmt.Errorf("%w: TTS_SAMPLE_RATE=%d", ErrInvalidEnvironmentValue, config.SampleRate)
+		}
 		return ttsqwen.NewProvider(ttsqwen.Config{
 			APIKey: config.APIKey, BaseURL: config.BaseURL, Model: config.Model,
 			Provider: string(ProviderAliyun), Voice: config.Voice,
