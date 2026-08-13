@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"testing/synctest"
 
 	"github.com/1024XEngineer/xe6-tsy/services/realtime-audio/asr"
 	"github.com/1024XEngineer/xe6-tsy/services/realtime-audio/tts"
@@ -80,36 +81,87 @@ func TestBindingCoordinatorLateVersionCannotOverwriteNewerBinding(t *testing.T) 
 }
 
 func TestBindingCoordinatorSharesPendingPreparationAndReturnsResolverFailure(t *testing.T) {
-	asrAdapter := asr.NewFakeProvider(asr.FakeProviderConfig{})
-	ttsAdapter := tts.NewFakeProvider(tts.FakeProviderConfig{})
-	resolver := newBlockingResolver()
-	coordinator := mustCoordinator(t, asrAdapter, ttsAdapter, resolver)
+	synctest.Test(t, func(t *testing.T) {
+		asrAdapter := asr.NewFakeProvider(asr.FakeProviderConfig{})
+		ttsAdapter := tts.NewFakeProvider(tts.FakeProviderConfig{})
+		resolver := newBlockingResolver()
+		coordinator := mustCoordinator(t, asrAdapter, ttsAdapter, resolver)
 
-	firstDone := make(chan error, 1)
-	go func() {
-		firstDone <- coordinator.Prepare(context.Background(), "session-1", 1, "zh-CN", "en-US")
-	}()
-	call := resolver.waitCall(t)
-	secondDone := make(chan error, 1)
-	go func() {
-		secondDone <- coordinator.Prepare(context.Background(), "session-1", 1, "zh-CN", "en-US")
-	}()
+		firstDone := make(chan error, 1)
+		go func() {
+			firstDone <- coordinator.Prepare(context.Background(), "session-1", 1, "zh-CN", "en-US")
+		}()
+		call := resolver.waitCall(t)
+		secondDone := make(chan error, 1)
+		go func() {
+			secondDone <- coordinator.Prepare(context.Background(), "session-1", 1, "zh-CN", "en-US")
+		}()
 
-	_, _, err := coordinator.AcquireForTurn(context.Background(), "session-1", 1)
-	if !errors.Is(err, ErrBindingPending) {
-		t.Fatalf("AcquireForTurn(pending) error = %v, want %v", err, ErrBindingPending)
-	}
-	call.respondErr(errors.New("resolver unavailable"))
-	if err := <-firstDone; err == nil || err.Error() != "resolver unavailable" {
-		t.Fatalf("first Prepare() error = %v, want resolver failure", err)
-	}
-	if err := <-secondDone; err == nil || err.Error() != "resolver unavailable" {
-		t.Fatalf("second Prepare() error = %v, want shared resolver failure", err)
-	}
-	_, _, err = coordinator.AcquireForTurn(context.Background(), "session-1", 1)
-	if !errors.Is(err, ErrBindingNotPrepared) {
-		t.Fatalf("AcquireForTurn(failed prepare) error = %v, want %v", err, ErrBindingNotPrepared)
-	}
+		_, _, err := coordinator.AcquireForTurn(context.Background(), "session-1", 1)
+		if !errors.Is(err, ErrBindingPending) {
+			t.Fatalf("AcquireForTurn(pending) error = %v, want %v", err, ErrBindingPending)
+		}
+		synctest.Wait()
+		call.respondErr(errors.New("resolver unavailable"))
+		if err := <-firstDone; err == nil || err.Error() != "resolver unavailable" {
+			t.Fatalf("first Prepare() error = %v, want resolver failure", err)
+		}
+		if err := <-secondDone; err == nil || err.Error() != "resolver unavailable" {
+			t.Fatalf("second Prepare() error = %v, want shared resolver failure", err)
+		}
+		_, _, err = coordinator.AcquireForTurn(context.Background(), "session-1", 1)
+		if !errors.Is(err, ErrBindingNotPrepared) {
+			t.Fatalf("AcquireForTurn(failed prepare) error = %v, want %v", err, ErrBindingNotPrepared)
+		}
+	})
+}
+
+func TestBindingCoordinatorRetriesFailedCurrentVersion(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		asrAdapter := asr.NewFakeProvider(asr.FakeProviderConfig{})
+		ttsAdapter := tts.NewFakeProvider(tts.FakeProviderConfig{})
+		resolver := newBlockingResolver()
+		coordinator := mustCoordinator(t, asrAdapter, ttsAdapter, resolver)
+
+		firstDone := make(chan error, 1)
+		go func() {
+			firstDone <- coordinator.Prepare(context.Background(), "session-1", 2, "zh-CN", "en-US")
+		}()
+		first := resolver.waitCall(t)
+		first.respondErr(errors.New("temporary route failure"))
+		if err := <-firstDone; err == nil || err.Error() != "temporary route failure" {
+			t.Fatalf("initial Prepare() error = %v, want temporary route failure", err)
+		}
+
+		// A failed current version remains fenced from older bindings, but a later
+		// stream retry must be allowed to establish a new pending resolution.
+		retryDone := make(chan error, 1)
+		go func() {
+			retryDone <- coordinator.Prepare(context.Background(), "session-1", 2, "zh-CN", "en-US")
+		}()
+		retry := resolver.waitCall(t)
+		sharedDone := make(chan error, 1)
+		go func() {
+			sharedDone <- coordinator.Prepare(context.Background(), "session-1", 2, "zh-CN", "en-US")
+		}()
+		synctest.Wait()
+		retry.respond(staticRoute())
+		if err := <-retryDone; err != nil {
+			t.Fatalf("retry Prepare() error = %v", err)
+		}
+		if err := <-sharedDone; err != nil {
+			t.Fatalf("shared retry Prepare() error = %v", err)
+		}
+
+		binding, release, err := coordinator.AcquireForTurn(context.Background(), "session-1", 2)
+		if err != nil {
+			t.Fatalf("AcquireForTurn() error = %v", err)
+		}
+		defer release()
+		if binding.LanguageConfigVersion != 2 {
+			t.Fatalf("binding version = %d, want 2", binding.LanguageConfigVersion)
+		}
+	})
 }
 
 func TestBindingCoordinatorRejectsSameVersionWithDifferentLanguagePair(t *testing.T) {
