@@ -3,6 +3,7 @@ package webrtc
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"math"
 	"math/rand"
 	"reflect"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/1024XEngineer/xe6-tsy/services/realtime-audio/audio"
 	"github.com/1024XEngineer/xe6-tsy/services/realtime-audio/pipeline"
+	"github.com/1024XEngineer/xe6-tsy/services/realtime-audio/tts"
 	"github.com/pion/webrtc/v4/pkg/media"
 	opus "github.com/tphakala/go-opus/opus"
 )
@@ -92,6 +94,45 @@ func TestOpusSampleTrackFlushesShortPCMOnlyOnComplete(t *testing.T) {
 	}
 	if len(writer.samples) != 1 {
 		t.Fatalf("sample count after Complete = %d, want 1", len(writer.samples))
+	}
+}
+
+func TestOpusSampleTrackRejectsNonCanonicalPCM(t *testing.T) {
+	tests := []struct {
+		name  string
+		chunk pipeline.AudioChunk
+	}{
+		{
+			name:  "container",
+			chunk: pipeline.AudioChunk{SessionID: "session-1", PlaybackID: "playback-1", SequenceNo: 1, Encoding: "audio/wav", SampleRate: audio.TTSSampleRate, Channels: audio.MonoChannels, Data: []byte{1, 0}},
+		},
+		{
+			name:  "wrong sample rate",
+			chunk: pipeline.AudioChunk{SessionID: "session-1", PlaybackID: "playback-1", SequenceNo: 1, Encoding: audio.PCMEncoding, SampleRate: 16_000, Channels: audio.MonoChannels, Data: []byte{1, 0}},
+		},
+		{
+			name:  "stereo",
+			chunk: pipeline.AudioChunk{SessionID: "session-1", PlaybackID: "playback-1", SequenceNo: 1, Encoding: audio.PCMEncoding, SampleRate: audio.TTSSampleRate, Channels: 2, Data: []byte{1, 0, 2, 0}},
+		},
+		{
+			name:  "partial sample",
+			chunk: pipeline.AudioChunk{SessionID: "session-1", PlaybackID: "playback-1", SequenceNo: 1, Encoding: audio.PCMEncoding, SampleRate: audio.TTSSampleRate, Channels: audio.MonoChannels, Data: []byte{1}},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			writer := &sampleRecorder{}
+			track, err := newOpusSampleTrack(writer, MediaConfig{})
+			if err != nil {
+				t.Fatalf("newOpusSampleTrack() error = %v", err)
+			}
+			if err := track.Write(t.Context(), test.chunk); !errors.Is(err, tts.ErrAudioChunkInvalid) {
+				t.Fatalf("Write() error = %v, want %v", err, tts.ErrAudioChunkInvalid)
+			}
+			if len(writer.samples) != 0 {
+				t.Fatalf("encoded samples = %#v, want none", writer.samples)
+			}
+		})
 	}
 }
 

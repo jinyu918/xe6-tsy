@@ -27,6 +27,48 @@ func TestSpeechOutputRejectsEmptyPlaybackID(t *testing.T) {
 	}
 }
 
+func TestSpeechOutputRejectsNonCanonicalTTSChunksBeforeAudioSink(t *testing.T) {
+	tests := []struct {
+		name  string
+		chunk tts.AudioChunk
+	}{
+		{
+			name:  "container",
+			chunk: tts.AudioChunk{SequenceNo: 1, Encoding: "audio/wav", SampleRate: 24_000, Channels: 1, Data: []byte{1, 0}},
+		},
+		{
+			name:  "wrong sample rate",
+			chunk: tts.AudioChunk{SequenceNo: 1, Encoding: "pcm_s16le", SampleRate: 16_000, Channels: 1, Data: []byte{1, 0}},
+		},
+		{
+			name:  "stereo",
+			chunk: tts.AudioChunk{SequenceNo: 1, Encoding: "pcm_s16le", SampleRate: 24_000, Channels: 2, Data: []byte{1, 0, 2, 0}},
+		},
+		{
+			name:  "partial sample",
+			chunk: tts.AudioChunk{SequenceNo: 1, Encoding: "pcm_s16le", SampleRate: 24_000, Channels: 1, Data: []byte{1}},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			audioSink := &recordingAudioSink{}
+			speech := NewSpeechOutput(SpeechOutputDependencies{
+				TTS:   tts.NewFakeProvider(tts.FakeProviderConfig{Chunks: []tts.AudioChunk{test.chunk}}),
+				Audio: audioSink, Runtime: &recordingRuntimeReporter{},
+			})
+			_, err := speech.Play(t.Context(), SpeechOutputRequest{
+				Turn: testTurn(), Language: "en-US", Text: "hello", PlaybackID: "playback-1",
+			})
+			if !errors.Is(err, tts.ErrAudioChunkInvalid) {
+				t.Fatalf("Play() error = %v, want %v", err, tts.ErrAudioChunkInvalid)
+			}
+			if len(audioSink.chunks) != 0 {
+				t.Fatalf("audio chunks = %#v, want none", audioSink.chunks)
+			}
+		})
+	}
+}
+
 func TestPipelineFinalFlowCarriesTurnID(t *testing.T) {
 	translator := &translate.FakeProvider{Result: translate.Result{Text: "hello", Provider: "mock-translate", Model: "v1", InputTokens: 2, OutputTokens: 1}}
 	ttsProvider := tts.NewFakeProvider(tts.FakeProviderConfig{
@@ -443,8 +485,8 @@ func TestPipelineTTSFailureReportsAcceptedFinalTurn(t *testing.T) {
 			audioSink: &recordingAudioSink{},
 		},
 		{
-			name:      "audio",
-			wantErr:   audioErr,
+			name:    "audio",
+			wantErr: audioErr,
 			config: tts.FakeProviderConfig{Chunks: []tts.AudioChunk{
 				{SequenceNo: 1, Encoding: "pcm_s16le", SampleRate: 24000, Channels: 1, Data: []byte{1, 0}},
 			}},
