@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"errors"
-	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -32,11 +31,11 @@ func run(
 	if err != nil {
 		return err
 	}
-	handler, err := newControlPlaneHandler(cfg.TicketSecret)
+	application, err := newControlPlaneRuntimeWithConfig(ctx, cfg)
 	if err != nil {
 		return err
 	}
-	server := newHTTPServer(cfg.Addr, handler)
+	server := newHTTPServer(cfg.Addr, application.Handler)
 	if listenAndServe == nil {
 		listenAndServe = func(s *http.Server) error { return s.ListenAndServe() }
 	}
@@ -56,11 +55,13 @@ func run(
 	case <-ctx.Done():
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 		defer cancel()
-		if err := server.Shutdown(shutdownCtx); err != nil {
-			return fmt.Errorf("shutdown http server: %w", err)
-		}
-		return <-errCh
+		shutdownErr := server.Shutdown(shutdownCtx)
+		closeErr := application.Close(shutdownCtx)
+		listenerErr := <-errCh
+		return errors.Join(shutdownErr, closeErr, listenerErr)
 	case err := <-errCh:
-		return err
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+		defer cancel()
+		return errors.Join(err, application.Close(shutdownCtx))
 	}
 }

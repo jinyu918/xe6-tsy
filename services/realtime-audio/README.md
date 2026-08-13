@@ -157,6 +157,9 @@ Required env:
 | `REALTIME_OUTBOX` | `memory` | `memory` 仅允许 `APP_ENV=local/test/development`；其他环境使用 `valkey`，需要 `REDIS_URL` |
 | `REALTIME_REDIS_MODE` | `standalone` | `standalone` 或 `cluster`；Cluster endpoint 必须显式选择 `cluster`，且 `REDIS_URL` 不带数据库路径 |
 | `LINGOW_MODE_CHANGED_STREAM` | `lingow:realtime:mode:changed` | `realtime.mode.changed` 的 Valkey Stream |
+| `LINGOW_LANGUAGE_CONFIG_CHANGED_STREAM` | `lingow:language:config:changed` | API `language.config.changed` Valkey Stream; required with `REALTIME_API_DATABASE=enabled` |
+| `LINGOW_LANGUAGE_CONFIG_CHANGED_GROUP` | `lingow-realtime-language-config` | Shared consumer group for realtime replicas |
+| `LINGOW_LANGUAGE_CONFIG_CHANGED_CONSUMER` | `realtime-language-config-worker` | Consumer identity; set a unique value per process or replica |
 | `ASR_SERVER_VAD` | _(unset → false in entrypoint)_ | Set `true` to enable Qwen server_vad; the local VAD keeps 500 ms prefix audio and preserves quiet frames inside an utterance |
 | `LOCAL_VAD_PROVIDER` | `silero` | `silero` (default) or `energy` fallback |
 | `LOCAL_VAD_MODEL_PATH` | `vad/silero/silero_vad.onnx` | Silero v5 ONNX model used by the local segmenter |
@@ -172,7 +175,7 @@ REDIS_CLUSTER_URL='redis://user:password@host1:6379?addr=host2:6379&addr=host3:6
 
 Provider switch (Phase 3): keep `start-local.bat`, set `ASR_PROVIDER=aliyun` + `LLM_PROVIDER=aliyun` plus Qwen keys in root `.env`, restart. Leave downlink at `none` so TTS stays mock while you validate real subtitles. No control-plane protocol change.
 
-When `REALTIME_API_DATABASE=enabled`, the process loads every active ASR/TTS profile and language-pair route from PostgreSQL at startup to construct its process-local provider registry. It resolves the active route again when a session begins, so a route changed after startup is used by later sessions when it references already registered Profiles. Adding a Profile still requires the controlled rolling restart that constructs its adapter. Existing session bindings remain unchanged until a later language-configuration switch prepares a replacement.
+When `REALTIME_API_DATABASE=enabled`, the process loads every active ASR/TTS profile and language-pair route from PostgreSQL at startup to construct its process-local provider registry. It consumes `language.config.changed` from the dedicated Valkey Stream: the current Turn retains its binding, while the new language configuration resolves the current active route and prepares in the background. It becomes eligible for a later Turn only after preparation succeeds. Route changes can select already registered Profiles; adding a Profile still requires the controlled rolling restart that constructs its adapter. Each replica must use a distinct `LINGOW_LANGUAGE_CONFIG_CHANGED_CONSUMER`; a stopped session rejects and acknowledges delayed events until a later Start opens a new binding lifecycle.
 
 Routes: `/realtime/v1/sessions/{id}/webrtc/config|offer`, `ice-candidates`, `start|stop`, `runtime`, `mode`, `connection`.
 Local adapters live under `localruntime/` (`TrustSessionReader`, `StaticLanguageConfigReader`, `StaticWebRTCConfig`, WebRTC frame/sink bridges).
