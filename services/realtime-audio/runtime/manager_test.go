@@ -151,6 +151,9 @@ func TestManagerPreparesSpeechBindingBeforeOpeningInput(t *testing.T) {
 	if got := bindings.Prepares(); len(got) != 1 || got[0].version != 7 || got[0].languageA != "en-US" || got[0].languageB != "zh-CN" {
 		t.Fatalf("speech prepares = %#v", got)
 	}
+	if got := bindings.OpenedSessions(); len(got) != 1 || got[0] != snapshot.SessionID {
+		t.Fatalf("opened speech sessions = %#v", got)
+	}
 	if opens != 1 {
 		t.Fatalf("audio opens = %d, want 1 after successful prepare", opens)
 	}
@@ -1236,10 +1239,17 @@ type speechPrepareCall struct {
 
 type recordingSpeechBindings struct {
 	mu         sync.Mutex
+	opened     []string
 	prepares   []speechPrepareCall
 	closed     []string
 	prepareErr error
 	acquireErr error
+}
+
+func (r *recordingSpeechBindings) OpenSession(sessionID string) {
+	r.mu.Lock()
+	r.opened = append(r.opened, sessionID)
+	r.mu.Unlock()
 }
 
 func (r *recordingSpeechBindings) Prepare(_ context.Context, sessionID string, version int64, languageA, languageB string) error {
@@ -1267,6 +1277,12 @@ func (r *recordingSpeechBindings) Prepares() []speechPrepareCall {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return append([]speechPrepareCall(nil), r.prepares...)
+}
+
+func (r *recordingSpeechBindings) OpenedSessions() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]string(nil), r.opened...)
 }
 
 func (r *recordingSpeechBindings) ClosedSessions() []string {

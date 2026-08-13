@@ -98,6 +98,20 @@ func NewBindingCoordinator(registry *ProviderRegistry, resolver RouteResolver) (
 	}, nil
 }
 
+// OpenSession admits a runtime session to binding preparation. A stopped
+// session has no state, so delayed stream events cannot recreate bindings until
+// a subsequent runtime Start explicitly opens that session again.
+func (c *BindingCoordinator) OpenSession(sessionID string) {
+	if c == nil || sessionID == "" {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.sessions[sessionID] == nil {
+		c.sessions[sessionID] = &sessionBindingState{}
+	}
+}
+
 // Prepare resolves and installs the speech binding for one language-config
 // version. Calls for the same version and language pair share one preparation;
 // a larger version supersedes any older pending resolution before it can commit.
@@ -128,8 +142,8 @@ func (c *BindingCoordinator) Prepare(
 	c.mu.Lock()
 	state := c.sessions[sessionID]
 	if state == nil {
-		state = &sessionBindingState{}
-		c.sessions[sessionID] = state
+		c.mu.Unlock()
+		return ErrBindingSessionClosed
 	}
 	if state.closed {
 		c.mu.Unlock()
@@ -271,7 +285,7 @@ func (c *BindingCoordinator) AcquireForTurn(
 
 // CloseSession removes one session's binding state and cancels its pending
 // resolver. Existing lease values remain usable because they own immutable
-// provider references; a later session with the same id starts with fresh state.
+// provider references. Further Prepare calls require a new OpenSession call.
 func (c *BindingCoordinator) CloseSession(sessionID string) {
 	if c == nil || sessionID == "" {
 		return

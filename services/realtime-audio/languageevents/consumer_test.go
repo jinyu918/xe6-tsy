@@ -60,6 +60,23 @@ func TestConsumerPreparesValidEventAndAcknowledges(t *testing.T) {
 	}
 }
 
+func TestConsumerAcknowledgesEventForStoppedSession(t *testing.T) {
+	stream := &recordingStream{messages: []StreamMessage{{Payload: marshalEvent(t, testEvent("event-1", 1)), Receipt: "receipt-1"}}}
+	preparer := &recordingPreparer{errs: []error{speech.ErrBindingSessionClosed}}
+	consumer := mustConsumer(t, stream, preparer)
+
+	processed, err := consumer.ProcessOnce(t.Context())
+	if !processed || !errors.Is(err, speech.ErrBindingSessionClosed) {
+		t.Fatalf("ProcessOnce() = (%v, %v), want stopped-session preparation error", processed, err)
+	}
+	if got := stream.ackedReceipts(); len(got) != 1 || got[0] != "receipt-1" {
+		t.Fatalf("acked receipts = %v, want stopped-session event acknowledged", got)
+	}
+	if got := stream.nackedReceipts(); len(got) != 0 {
+		t.Fatalf("nacked receipts = %v, want no retry for stopped session", got)
+	}
+}
+
 func TestConsumerDuplicateReceiptJoinsPendingPreparation(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		stream := &recordingStream{}
@@ -216,6 +233,7 @@ func TestConsumerPreservesNewerCoordinatorBindingAfterLateResolverReturns(t *tes
 		if err != nil {
 			t.Fatalf("NewBindingCoordinator() error = %v", err)
 		}
+		coordinator.OpenSession("session-1")
 		consumer := mustConsumer(t, &recordingStream{}, coordinator)
 
 		if err := consumer.schedule(t.Context(), StreamMessage{Payload: marshalEvent(t, testEvent("event-1", 1)), Receipt: "v1"}); err != nil {

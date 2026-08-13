@@ -14,6 +14,7 @@ func TestBindingCoordinatorPreparesAndLeasesExactVersion(t *testing.T) {
 	asrAdapter := asr.NewFakeProvider(asr.FakeProviderConfig{})
 	ttsAdapter := tts.NewFakeProvider(tts.FakeProviderConfig{})
 	coordinator := mustCoordinator(t, asrAdapter, ttsAdapter, staticResolver(t))
+	coordinator.OpenSession("session-1")
 
 	if err := coordinator.Prepare(context.Background(), "session-1", 7, "zh-CN", "en-US"); err != nil {
 		t.Fatalf("Prepare() error = %v", err)
@@ -45,6 +46,7 @@ func TestBindingCoordinatorLateVersionCannotOverwriteNewerBinding(t *testing.T) 
 	ttsAdapter := tts.NewFakeProvider(tts.FakeProviderConfig{})
 	resolver := newBlockingResolver()
 	coordinator := mustCoordinator(t, asrAdapter, ttsAdapter, resolver)
+	coordinator.OpenSession("session-1")
 
 	olderDone := make(chan error, 1)
 	go func() {
@@ -86,6 +88,7 @@ func TestBindingCoordinatorSharesPendingPreparationAndReturnsResolverFailure(t *
 		ttsAdapter := tts.NewFakeProvider(tts.FakeProviderConfig{})
 		resolver := newBlockingResolver()
 		coordinator := mustCoordinator(t, asrAdapter, ttsAdapter, resolver)
+		coordinator.OpenSession("session-1")
 
 		firstDone := make(chan error, 1)
 		go func() {
@@ -122,6 +125,7 @@ func TestBindingCoordinatorRetriesFailedCurrentVersion(t *testing.T) {
 		ttsAdapter := tts.NewFakeProvider(tts.FakeProviderConfig{})
 		resolver := newBlockingResolver()
 		coordinator := mustCoordinator(t, asrAdapter, ttsAdapter, resolver)
+		coordinator.OpenSession("session-1")
 
 		firstDone := make(chan error, 1)
 		go func() {
@@ -171,6 +175,7 @@ func TestBindingCoordinatorRejectsSameVersionWithDifferentLanguagePair(t *testin
 		tts.NewFakeProvider(tts.FakeProviderConfig{}),
 		staticResolver(t),
 	)
+	coordinator.OpenSession("session-1")
 	if err := coordinator.Prepare(context.Background(), "session-1", 1, "zh-CN", "en-US"); err != nil {
 		t.Fatalf("first Prepare() error = %v", err)
 	}
@@ -180,13 +185,14 @@ func TestBindingCoordinatorRejectsSameVersionWithDifferentLanguagePair(t *testin
 	}
 }
 
-func TestBindingCoordinatorCloseSessionRemovesStateButKeepsExistingLease(t *testing.T) {
+func TestBindingCoordinatorCloseSessionRequiresExplicitReopenButKeepsExistingLease(t *testing.T) {
 	coordinator := mustCoordinator(
 		t,
 		asr.NewFakeProvider(asr.FakeProviderConfig{}),
 		tts.NewFakeProvider(tts.FakeProviderConfig{}),
 		staticResolver(t),
 	)
+	coordinator.OpenSession("session-1")
 	if err := coordinator.Prepare(context.Background(), "session-1", 1, "zh-CN", "en-US"); err != nil {
 		t.Fatalf("Prepare() error = %v", err)
 	}
@@ -199,8 +205,12 @@ func TestBindingCoordinatorCloseSessionRemovesStateButKeepsExistingLease(t *test
 	if !errors.Is(err, ErrBindingNotPrepared) {
 		t.Fatalf("AcquireForTurn(after close) error = %v, want %v", err, ErrBindingNotPrepared)
 	}
+	if err := coordinator.Prepare(context.Background(), "session-1", 2, "zh-CN", "en-US"); !errors.Is(err, ErrBindingSessionClosed) {
+		t.Fatalf("Prepare(after close) error = %v, want %v", err, ErrBindingSessionClosed)
+	}
+	coordinator.OpenSession("session-1")
 	if err := coordinator.Prepare(context.Background(), "session-1", 2, "zh-CN", "en-US"); err != nil {
-		t.Fatalf("Prepare(fresh session after close) error = %v", err)
+		t.Fatalf("Prepare(after reopen) error = %v", err)
 	}
 	binding, freshRelease, err := coordinator.AcquireForTurn(context.Background(), "session-1", 2)
 	if err != nil {
@@ -221,6 +231,7 @@ func TestBindingCoordinatorCloseSessionCancelsPendingPreparation(t *testing.T) {
 		tts.NewFakeProvider(tts.FakeProviderConfig{}),
 		resolver,
 	)
+	coordinator.OpenSession("session-1")
 
 	prepared := make(chan error, 1)
 	go func() {
@@ -247,6 +258,7 @@ func TestBindingCoordinatorCloseSessionPreventsLatePreparationFromReplacingFresh
 	ttsAdapter := tts.NewFakeProvider(tts.FakeProviderConfig{})
 	resolver := newBlockingResolver()
 	coordinator := mustCoordinator(t, asrAdapter, ttsAdapter, resolver)
+	coordinator.OpenSession("session-1")
 
 	staleDone := make(chan error, 1)
 	go func() {
@@ -255,6 +267,10 @@ func TestBindingCoordinatorCloseSessionPreventsLatePreparationFromReplacingFresh
 	staleCall := resolver.waitCall(t)
 
 	coordinator.CloseSession("session-1")
+	if err := coordinator.Prepare(context.Background(), "session-1", 2, "zh-CN", "en-US"); !errors.Is(err, ErrBindingSessionClosed) {
+		t.Fatalf("Prepare(after close) error = %v, want %v", err, ErrBindingSessionClosed)
+	}
+	coordinator.OpenSession("session-1")
 
 	freshDone := make(chan error, 1)
 	go func() {
@@ -278,6 +294,18 @@ func TestBindingCoordinatorCloseSessionPreventsLatePreparationFromReplacingFresh
 	defer release()
 	if binding.LanguageConfigVersion != 2 {
 		t.Fatalf("binding version = %d, want 2", binding.LanguageConfigVersion)
+	}
+}
+
+func TestBindingCoordinatorRejectsPreparationUntilSessionIsOpened(t *testing.T) {
+	coordinator := mustCoordinator(
+		t,
+		asr.NewFakeProvider(asr.FakeProviderConfig{}),
+		tts.NewFakeProvider(tts.FakeProviderConfig{}),
+		staticResolver(t),
+	)
+	if err := coordinator.Prepare(context.Background(), "session-1", 1, "zh-CN", "en-US"); !errors.Is(err, ErrBindingSessionClosed) {
+		t.Fatalf("Prepare() error = %v, want %v", err, ErrBindingSessionClosed)
 	}
 }
 
