@@ -30,6 +30,10 @@ func TestHTTPCreateAndGetConfig(t *testing.T) {
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("create status=%d body=%s", rec.Code, rec.Body.String())
 	}
+	events := store.LanguageConfigChangeEvents()
+	if len(events) != 1 || events[0].TraceID != "req_http_1" {
+		t.Fatalf("language config change events = %#v", events)
+	}
 
 	getReq := httptest.NewRequest(http.MethodGet, "/api/v1/voice-sessions/vs_http/language-config", nil)
 	getReq = getReq.WithContext(webapi.WithAccountID(context.Background(), "acct_http"))

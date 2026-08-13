@@ -20,6 +20,7 @@ import (
 
 	"github.com/1024XEngineer/xe6-tsy/services/api/config"
 	"github.com/1024XEngineer/xe6-tsy/services/api/internal/delivery"
+	"github.com/1024XEngineer/xe6-tsy/services/api/languages"
 	"github.com/1024XEngineer/xe6-tsy/services/api/sessions"
 	"github.com/1024XEngineer/xe6-tsy/services/api/turns"
 	recordswebapi "github.com/1024XEngineer/xe6-tsy/services/api/webapi"
@@ -100,6 +101,35 @@ func (stubFinalTurnWorker) Run(ctx context.Context) error {
 
 type failFastFinalTurnWorker struct {
 	err error
+}
+
+type runtimeLanguageConfigOutboxRepository struct{}
+
+func (runtimeLanguageConfigOutboxRepository) ClaimLanguageConfigOutbox(context.Context, int) ([]languages.LanguageConfigOutboxRecord, error) {
+	return nil, nil
+}
+
+func (runtimeLanguageConfigOutboxRepository) MarkLanguageConfigOutboxPublished(context.Context, string) error {
+	return nil
+}
+
+func (runtimeLanguageConfigOutboxRepository) MarkLanguageConfigOutboxFailed(context.Context, string, string, time.Time) error {
+	return nil
+}
+
+type runtimeLanguageConfigPublisher struct{}
+
+func (runtimeLanguageConfigPublisher) PublishLanguageConfigChanged(context.Context, []byte) error {
+	return nil
+}
+
+func runtimeLanguageConfigDispatcher() backgroundWorker {
+	return languages.NewLanguageConfigOutboxDispatcher(
+		runtimeLanguageConfigOutboxRepository{},
+		runtimeLanguageConfigPublisher{},
+		time.Second,
+		nil,
+	)
 }
 
 func (w failFastFinalTurnWorker) Run(context.Context) error {
@@ -365,11 +395,28 @@ func TestConfiguredRuntimeServeRejectsEnabledSessionRuntimeWithoutModeConsumer(t
 	}
 }
 
+func TestConfiguredRuntimeServeRejectsEnabledSessionRuntimeWithoutLanguageConfigDispatcher(t *testing.T) {
+	runtime := newRuntimeServeFixture(t)
+	runtime.sessionRuntimeEnabled = true
+	runtime.sessionRecovery = stubFinalTurnWorker{}
+	runtime.modeConsumer = stubFinalTurnWorker{}
+	runtime.languageConfigOutbox = nil
+
+	err := runtime.Serve("127.0.0.1:0", http.NewServeMux())
+	if err == nil {
+		t.Fatal("Serve() succeeded with enabled session runtime and nil language config dispatcher")
+	}
+	if errors.Is(err, delivery.ErrWorkerNotConfigured) {
+		t.Fatalf("Serve() error = %v, want incomplete runtime before delivery worker starts", err)
+	}
+}
+
 func TestConfiguredRuntimeServeSupervisesSessionRecoveryWorker(t *testing.T) {
 	runtime := newRuntimeBlockingServeFixture(t)
 	runtime.sessionRuntimeEnabled = true
 	runtime.sessionRecovery = failFastFinalTurnWorker{err: sessions.ErrInvalidDependency}
 	runtime.modeConsumer = stubFinalTurnWorker{}
+	runtime.languageConfigOutbox = runtimeLanguageConfigDispatcher()
 
 	err := runtime.Serve("127.0.0.1:0", http.NewServeMux())
 	if err == nil || !errors.Is(err, sessions.ErrInvalidDependency) {

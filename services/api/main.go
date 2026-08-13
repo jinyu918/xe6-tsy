@@ -49,6 +49,7 @@ type recordsHTTPDependencies struct {
 type languageHTTPDependencies struct {
 	service *languages.Service
 	handler *languages.Handler
+	store   *languages.PostgresStore
 }
 
 type finalTurnWorker interface {
@@ -114,6 +115,7 @@ func run() error {
 	sessionHandler := newSessionHandler(nil)
 	var sessionRecovery backgroundWorker
 	var modeConsumer backgroundWorker
+	var languageConfigOutbox backgroundWorker
 	if processConfig.SessionRuntimeEnabled {
 		sessionDependencies, err := newSessionHTTPDependencies(sessionCompositionInputs{
 			Repository:     sessionRepository,
@@ -140,6 +142,14 @@ func run() error {
 			return err
 		}
 		modeConsumer, err = newModeProjectionConsumer(startupCtx, pool, redisClient, processConfig)
+		if err == nil {
+			languageConfigOutbox = languages.NewLanguageConfigOutboxDispatcher(
+				langDependencies.store,
+				languages.NewValkeyLanguageConfigChangedPublisher(redisClient, processConfig.LanguageConfigStream),
+				time.Second,
+				slog.Default(),
+			)
+		}
 		cancelStartup()
 		if err != nil {
 			_ = redisClient.Close()
@@ -202,6 +212,12 @@ func run() error {
 		workers = append(workers, namedBackgroundWorker{
 			name: "mode projection consumer",
 			run:  modeConsumer.Run,
+		})
+	}
+	if languageConfigOutbox != nil {
+		workers = append(workers, namedBackgroundWorker{
+			name: "language config outbox dispatcher",
+			run:  languageConfigOutbox.Run,
 		})
 	}
 	return runHTTPAndBackgroundWorkers(ctx, server, workers...)
@@ -284,6 +300,7 @@ func newLanguageDependenciesWithPool(
 	return &languageHTTPDependencies{
 		service: svc,
 		handler: languages.NewHandler(svc, accountID),
+		store:   store,
 	}, nil
 }
 

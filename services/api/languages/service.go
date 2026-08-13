@@ -112,6 +112,18 @@ func (s *Service) CreateConfig(
 	accountID, sessionID, idempotencyKey string,
 	req CreateLanguageConfigRequest,
 ) (LanguageConfig, error) {
+	return s.CreateConfigWithTrace(ctx, accountID, sessionID, idempotencyKey, "", req)
+}
+
+// CreateConfigWithTrace creates or switches the active config and records the
+// trace carried by the resulting durable language.config.changed event. Empty
+// trace IDs remain valid for non-HTTP callers; the store then derives a stable
+// internal trace from the new configuration ID.
+func (s *Service) CreateConfigWithTrace(
+	ctx context.Context,
+	accountID, sessionID, idempotencyKey, traceID string,
+	req CreateLanguageConfigRequest,
+) (LanguageConfig, error) {
 	if accountID == "" {
 		return LanguageConfig{}, ErrUnauthenticated
 	}
@@ -175,6 +187,7 @@ func (s *Service) CreateConfig(
 		IdempotencyKey:     idempotencyKey,
 		ExpectedVersion:    req.ExpectedVersion,
 		RequestFingerprint: fingerprint,
+		TraceID:            traceID,
 	})
 	if err == nil {
 		return created, nil

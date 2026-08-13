@@ -108,13 +108,9 @@ func (s *PostgresStore) CreateActiveConfig(ctx context.Context, input CreateConf
 		return LanguageConfig{}, fmt.Errorf("%w: language_pairs is required", ErrInvalidRequest)
 	}
 
-	routes := append([]OutputRoute(nil), input.OutputRoutes...)
-	if len(routes) == 0 {
-		var err error
-		routes, err = normalizeOutputRoutes(input.LanguagePairs, nil)
-		if err != nil {
-			return LanguageConfig{}, err
-		}
+	routes, err := normalizeOutputRoutes(input.LanguagePairs, input.OutputRoutes)
+	if err != nil {
+		return LanguageConfig{}, err
 	}
 	pairsJSON, err := json.Marshal(languageConfigPayload{LanguagePairs: input.LanguagePairs, OutputRoutes: routes})
 	if err != nil {
@@ -189,11 +185,7 @@ INSERT INTO voice_session_language_configs (
 		return LanguageConfig{}, fmt.Errorf("insert active config: %w", err)
 	}
 
-	if err := tx.Commit(ctx); err != nil {
-		return LanguageConfig{}, fmt.Errorf("commit create config: %w", err)
-	}
-
-	return LanguageConfig{
+	created := LanguageConfig{
 		ID:                 id,
 		SessionID:          input.SessionID,
 		Version:            nextVersion,
@@ -206,7 +198,16 @@ INSERT INTO voice_session_language_configs (
 		CreatedBy:          input.CreatedBy,
 		CreatedAt:          now,
 		RequestFingerprint: input.RequestFingerprint,
-	}, nil
+	}
+	if err := insertLanguageConfigOutbox(ctx, tx, created, input.TraceID); err != nil {
+		return LanguageConfig{}, err
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return LanguageConfig{}, fmt.Errorf("commit create config: %w", err)
+	}
+
+	return created, nil
 }
 
 func (s *PostgresStore) ListConfigs(ctx context.Context, query ListConfigsQuery) ([]LanguageConfig, string, error) {

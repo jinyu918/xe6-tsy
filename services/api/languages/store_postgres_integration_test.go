@@ -4,11 +4,13 @@ package languages
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"testing"
 	"time"
 
+	realtimev1 "github.com/1024XEngineer/xe6-tsy/packages/contracts/realtime/v1"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/oklog/ulid/v2"
@@ -43,11 +45,22 @@ func openTestPool(t *testing.T) *pgxpool.Pool {
 
 func cleanupSession(t *testing.T, pool *pgxpool.Pool, sessionID string) {
 	t.Helper()
+	if _, err := pool.Exec(context.Background(), `DELETE FROM language_config_outbox WHERE session_id = $1`, sessionID); err != nil {
+		t.Fatalf("cleanup language config outbox for %s: %v", sessionID, err)
+	}
 	_, err := pool.Exec(context.Background(),
 		`DELETE FROM voice_session_language_configs WHERE session_id = $1`, sessionID)
 	if err != nil {
 		t.Fatalf("cleanup session %s: %v", sessionID, err)
 	}
+}
+
+func prepareSession(t *testing.T, pool *pgxpool.Pool, sessionID string) {
+	t.Helper()
+	cleanupSession(t, pool, sessionID)
+	t.Cleanup(func() {
+		cleanupSession(t, pool, sessionID)
+	})
 }
 
 func TestPostgresMigrationsAndSupportedLanguages(t *testing.T) {
@@ -143,7 +156,7 @@ func TestPostgresCreateActiveConfigLifecycle(t *testing.T) {
 	store := NewPostgresStore(pool, fixedClock{at: time.Date(2026, 7, 27, 2, 0, 0, 0, time.UTC)})
 	ctx := context.Background()
 	sessionID := "vs_lang_it_001"
-	cleanupSession(t, pool, sessionID)
+	prepareSession(t, pool, sessionID)
 
 	pairs := []LanguagePair{
 		{Source: "zh-CN", Target: "en-US"},
@@ -212,12 +225,133 @@ func TestPostgresCreateActiveConfigLifecycle(t *testing.T) {
 	}
 }
 
+func TestPostgresCreateActiveConfigPersistsLanguageConfigOutbox(t *testing.T) {
+	pool := openTestPool(t)
+	store := NewPostgresStore(pool, fixedClock{at: time.Date(2026, 8, 13, 4, 0, 0, 0, time.UTC)})
+	ctx := context.Background()
+	sessionID := "vs_lang_it_outbox_001"
+	prepareSession(t, pool, sessionID)
+
+	created, err := store.CreateActiveConfig(ctx, CreateConfigInput{
+		SessionID: sessionID,
+		LanguagePairs: []LanguagePair{
+			{Source: "zh-CN", Target: "en-US"},
+			{Source: "en-US", Target: "zh-CN"},
+		},
+		CreatedBy: "user_test",
+		TraceID:   "trace-language-config-outbox",
+	})
+	if err != nil {
+		t.Fatalf("CreateActiveConfig() error = %v", err)
+	}
+
+	var (
+		recordID    string
+		payload     []byte
+		publishedAt *time.Time
+	)
+	if err := pool.QueryRow(ctx, `
+SELECT id, payload, published_at
+FROM language_config_outbox
+WHERE language_config_id = $1`, created.ID).Scan(&recordID, &payload, &publishedAt); err != nil {
+		t.Fatalf("read language config outbox: %v", err)
+	}
+	if recordID != "language_config_outbox_"+created.ID {
+		t.Fatalf("record ID = %q", recordID)
+	}
+	if publishedAt != nil {
+		t.Fatalf("published_at = %v, want NULL", publishedAt)
+	}
+	var event realtimev1.LanguageConfigChangedEvent
+	if err := json.Unmarshal(payload, &event); err != nil {
+		t.Fatalf("decode outbox event: %v", err)
+	}
+	if event.EventID != "language-config:"+created.ID ||
+		event.TraceID != "trace-language-config-outbox" ||
+		event.SessionID != sessionID ||
+		event.LanguageConfigVersion != int64(created.Version) {
+		t.Fatalf("outbox event = %#v", event)
+	}
+}
+
+func TestPostgresLanguageConfigOutboxDispatchLifecycle(t *testing.T) {
+	pool := openTestPool(t)
+	store := NewPostgresStore(pool, nil)
+	ctx := context.Background()
+	sessionID := "vs_lang_it_outbox_dispatch_" + ulid.Make().String()
+	prepareSession(t, pool, sessionID)
+
+	created, err := store.CreateActiveConfig(ctx, CreateConfigInput{
+		SessionID: sessionID,
+		LanguagePairs: []LanguagePair{
+			{Source: "zh-CN", Target: "en-US"},
+			{Source: "en-US", Target: "zh-CN"},
+		},
+		CreatedBy: "user_test",
+	})
+	if err != nil {
+		t.Fatalf("CreateActiveConfig() error = %v", err)
+	}
+	recordID := "language_config_outbox_" + created.ID
+	if _, err := pool.Exec(ctx, `
+UPDATE language_config_outbox
+SET available_at = CURRENT_TIMESTAMP - INTERVAL '1 second'
+WHERE id = $1`, recordID); err != nil {
+		t.Fatalf("make outbox row eligible: %v", err)
+	}
+
+	claimed, err := store.ClaimLanguageConfigOutbox(ctx, 1)
+	if err != nil {
+		t.Fatalf("ClaimLanguageConfigOutbox() error = %v", err)
+	}
+	if len(claimed) != 1 || claimed[0].ID != recordID || claimed[0].Attempts != 1 {
+		t.Fatalf("claimed records = %#v, want one first-attempt record %q", claimed, recordID)
+	}
+
+	retryAt := time.Now().UTC().Add(time.Hour)
+	if err := store.MarkLanguageConfigOutboxFailed(ctx, recordID, "Valkey unavailable", retryAt); err != nil {
+		t.Fatalf("MarkLanguageConfigOutboxFailed() error = %v", err)
+	}
+	claimed, err = store.ClaimLanguageConfigOutbox(ctx, 1)
+	if err != nil {
+		t.Fatalf("ClaimLanguageConfigOutbox() during retry delay error = %v", err)
+	}
+	if len(claimed) != 0 {
+		t.Fatalf("claimed during retry delay = %#v, want none", claimed)
+	}
+
+	if _, err := pool.Exec(ctx, `
+UPDATE language_config_outbox
+SET available_at = CURRENT_TIMESTAMP - INTERVAL '1 second'
+WHERE id = $1`, recordID); err != nil {
+		t.Fatalf("make failed outbox row eligible: %v", err)
+	}
+	claimed, err = store.ClaimLanguageConfigOutbox(ctx, 1)
+	if err != nil {
+		t.Fatalf("ClaimLanguageConfigOutbox() after retry delay error = %v", err)
+	}
+	if len(claimed) != 1 || claimed[0].ID != recordID || claimed[0].Attempts != 2 {
+		t.Fatalf("reclaimed records = %#v, want second-attempt record %q", claimed, recordID)
+	}
+
+	if err := store.MarkLanguageConfigOutboxPublished(ctx, recordID); err != nil {
+		t.Fatalf("MarkLanguageConfigOutboxPublished() error = %v", err)
+	}
+	claimed, err = store.ClaimLanguageConfigOutbox(ctx, 1)
+	if err != nil {
+		t.Fatalf("ClaimLanguageConfigOutbox() after publication error = %v", err)
+	}
+	if len(claimed) != 0 {
+		t.Fatalf("claimed published records = %#v, want none", claimed)
+	}
+}
+
 func TestPostgresExpectedVersionConflict(t *testing.T) {
 	pool := openTestPool(t)
 	store := NewPostgresStore(pool, nil)
 	ctx := context.Background()
 	sessionID := "vs_lang_it_002"
-	cleanupSession(t, pool, sessionID)
+	prepareSession(t, pool, sessionID)
 
 	pairs := []LanguagePair{
 		{Source: "zh-CN", Target: "en-US"},
@@ -246,7 +380,7 @@ func TestPostgresIdempotencyKeyLookupAndConflict(t *testing.T) {
 	store := NewPostgresStore(pool, nil)
 	ctx := context.Background()
 	sessionID := "vs_lang_it_003"
-	cleanupSession(t, pool, sessionID)
+	prepareSession(t, pool, sessionID)
 
 	pairs := []LanguagePair{
 		{Source: "zh-CN", Target: "en-US"},
@@ -294,7 +428,7 @@ func TestPostgresConcurrentFirstCreateDifferentIdempotencyKeys(t *testing.T) {
 	pool := openTestPool(t)
 	ctx := context.Background()
 	sessionID := "vs_lang_it_concurrent_001"
-	cleanupSession(t, pool, sessionID)
+	prepareSession(t, pool, sessionID)
 
 	pairsJSON := `[{"source":"zh-CN","target":"en-US"},{"source":"en-US","target":"zh-CN"}]`
 

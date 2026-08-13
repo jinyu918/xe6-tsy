@@ -52,6 +52,7 @@ type Config struct {
 	ModeChangedStream     string
 	ModeChangedGroup      string
 	ModeChangedConsumer   string
+	LanguageConfigStream  string
 	SMTPHost              string
 	SMTPPort              string
 	SMTPUser              string
@@ -108,6 +109,7 @@ func LoadFrom(getenv func(string) (string, bool)) (Config, error) {
 		ModeChangedStream:     value("LINGOW_MODE_CHANGED_STREAM", ""),
 		ModeChangedGroup:      value("LINGOW_MODE_CHANGED_GROUP", ""),
 		ModeChangedConsumer:   value("LINGOW_MODE_CHANGED_CONSUMER", ""),
+		LanguageConfigStream:  value("LINGOW_LANGUAGE_CONFIG_CHANGED_STREAM", "lingow:language:config:changed"),
 		SMTPHost:              value("LINGOW_SMTP_HOST", ""),
 		SMTPPort:              value("LINGOW_SMTP_PORT", "587"),
 		SMTPUser:              value("LINGOW_SMTP_USER", ""),

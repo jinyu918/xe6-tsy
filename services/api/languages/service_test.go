@@ -102,6 +102,64 @@ func TestServicePersistsPerTargetOutputRoutes(t *testing.T) {
 	}
 }
 
+func TestServiceCreatesOneDurableLanguageConfigChangeEvent(t *testing.T) {
+	store := NewMemoryStore(nil, nil)
+	svc := NewService(store, MapSessionOwner{"vs_1": "acct_1"})
+
+	created, err := svc.CreateConfigWithTrace(t.Context(), "acct_1", "vs_1", "config-1", "trace-1", CreateLanguageConfigRequest{
+		Languages: bilingualPairs(),
+	})
+	if err != nil {
+		t.Fatalf("CreateConfigWithTrace() error = %v", err)
+	}
+	events := store.LanguageConfigChangeEvents()
+	if len(events) != 1 {
+		t.Fatalf("event count = %d, want 1", len(events))
+	}
+	event := events[0]
+	if event.EventID != "language-config:"+created.ID || event.TraceID != "trace-1" ||
+		event.SessionID != created.SessionID || event.LanguageConfigVersion != int64(created.Version) {
+		t.Fatalf("event identity = %#v", event)
+	}
+	if len(event.LanguagePairs) != 2 || len(event.OutputRoutes) != 2 {
+		t.Fatalf("event routing payload = %#v", event)
+	}
+
+	if _, err := svc.CreateConfigWithTrace(t.Context(), "acct_1", "vs_1", "config-1", "trace-retry", CreateLanguageConfigRequest{
+		Languages: bilingualPairs(),
+	}); err != nil {
+		t.Fatalf("idempotent replay error = %v", err)
+	}
+	if got := len(store.LanguageConfigChangeEvents()); got != 1 {
+		t.Fatalf("event count after replay = %d, want 1", got)
+	}
+}
+
+func TestServiceDoesNotChangeConfigWhenOutboxWriteFails(t *testing.T) {
+	store := NewMemoryStore(nil, nil)
+	store.FailNextLanguageConfigOutbox(errors.New("outbox unavailable"))
+	svc := NewService(store, MapSessionOwner{"vs_1": "acct_1"})
+
+	_, err := svc.CreateConfig(t.Context(), "acct_1", "vs_1", "config-fail", CreateLanguageConfigRequest{Languages: bilingualPairs()})
+	if err == nil || err.Error() != "outbox unavailable" {
+		t.Fatalf("CreateConfig() error = %v, want outbox failure", err)
+	}
+	if _, err := store.GetActiveConfig(t.Context(), "vs_1"); !errors.Is(err, ErrNoActiveConfig) {
+		t.Fatalf("GetActiveConfig() error = %v, want %v", err, ErrNoActiveConfig)
+	}
+	if got := len(store.LanguageConfigChangeEvents()); got != 0 {
+		t.Fatalf("event count = %d, want 0", got)
+	}
+
+	created, err := svc.CreateConfig(t.Context(), "acct_1", "vs_1", "config-success", CreateLanguageConfigRequest{Languages: bilingualPairs()})
+	if err != nil {
+		t.Fatalf("retry CreateConfig() error = %v", err)
+	}
+	if created.Version != 1 {
+		t.Fatalf("created version = %d, want 1 after failed transaction", created.Version)
+	}
+}
+
 func TestServiceValidatesInterpretationOutputPresets(t *testing.T) {
 	tests := []struct {
 		name    string

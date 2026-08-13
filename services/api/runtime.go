@@ -38,6 +38,7 @@ type configuredRuntime struct {
 	worker                *delivery.Worker
 	usageConsumer         *usage.Consumer
 	modeConsumer          backgroundWorker
+	languageConfigOutbox  backgroundWorker
 	accountService        accounts.Service
 	usageService          usage.Service
 	deliveryService       delivery.Service
@@ -238,12 +239,19 @@ func newConfiguredRuntime(ctx context.Context, processConfig config.Config) (*co
 	}
 	usageConsumer := usage.NewConsumer(usageStream, usageService)
 	var modeConsumer backgroundWorker
+	var languageConfigOutbox backgroundWorker
 	if processConfig.SessionRuntimeEnabled {
 		modeConsumer, err = newModeProjectionConsumer(startupCtx, pool, redisClient, processConfig)
 		if err != nil {
 			redisClient.Close()
 			return nil, nil, err
 		}
+		languageConfigOutbox = languages.NewLanguageConfigOutboxDispatcher(
+			languageDependencies.store,
+			languages.NewValkeyLanguageConfigChangedPublisher(redisClient, processConfig.LanguageConfigStream),
+			time.Second,
+			slog.Default(),
+		)
 	}
 
 	runtime := &configuredRuntime{
@@ -257,6 +265,7 @@ func newConfiguredRuntime(ctx context.Context, processConfig config.Config) (*co
 		}),
 		usageConsumer:         usageConsumer,
 		modeConsumer:          modeConsumer,
+		languageConfigOutbox:  languageConfigOutbox,
 		accountService:        records.accounts,
 		usageService:          usageService,
 		deliveryService:       deliveryService,
@@ -385,7 +394,7 @@ func (r *configuredRuntime) Serve(address string, handler http.Handler) error {
 	if r.sessionRuntimeEnabled && r.sessionRecovery == nil {
 		return errors.New("configured runtime is incomplete")
 	}
-	if r.sessionRuntimeEnabled && r.modeConsumer == nil {
+	if r.sessionRuntimeEnabled && (r.modeConsumer == nil || r.languageConfigOutbox == nil) {
 		return errors.New("configured runtime is incomplete")
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -413,6 +422,10 @@ func (r *configuredRuntime) Serve(address string, handler http.Handler) error {
 	if r.modeConsumer != nil {
 		components.Add(1)
 		go runDeliveryComponent(componentCtx, "mode projection consumer", r.modeConsumer.Run, errs, &components)
+	}
+	if r.languageConfigOutbox != nil {
+		components.Add(1)
+		go runDeliveryComponent(componentCtx, "language config outbox dispatcher", r.languageConfigOutbox.Run, errs, &components)
 	}
 	if r.authMaintainer != nil {
 		components.Add(1)
