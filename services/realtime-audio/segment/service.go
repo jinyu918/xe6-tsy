@@ -303,6 +303,12 @@ func (s *Service) handleEvents(ctx context.Context, request Request, events []va
 			AudioChunks:    audioChunks(event.Frames),
 		})
 		if err != nil {
+			// A config change can leave the exact Turn binding pending or failed.
+			// Drop only this finalized utterance so a later retry can use the
+			// ready binding; all unrelated processing failures remain terminal.
+			if errors.Is(err, pipeline.ErrTurnSpeechBindingUnavailable) {
+				continue
+			}
 			return fmt.Errorf("process audio Turn: %w", err)
 		}
 	}

@@ -339,6 +339,36 @@ func TestAPIDatabaseAndUsageOutboxFlags(t *testing.T) {
 	}
 }
 
+func TestControlPlaneResourcesCloseContinuesAfterConsumerWaitTimeout(t *testing.T) {
+	languageClosed := false
+	outboxClosed := false
+	poolClosed := false
+	resources := &controlPlaneResources{
+		languageDone: make(chan struct{}),
+		languageRuntime: closerFunc(func() error {
+			languageClosed = true
+			return nil
+		}),
+		outbox: closerFunc(func() error {
+			outboxClosed = true
+			return nil
+		}),
+		closePool: func() { poolClosed = true },
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	if err := resources.Close(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Close() error = %v, want context cancellation", err)
+	}
+	if !languageClosed || !outboxClosed || !poolClosed {
+		t.Fatalf("resource cleanup = language=%t outbox=%t pool=%t", languageClosed, outboxClosed, poolClosed)
+	}
+}
+
+type closerFunc func() error
+
+func (f closerFunc) Close() error { return f() }
+
 func TestLoadProcessConfigOpusAndCustomLanguages(t *testing.T) {
 	cfg, err := loadProcessConfig(func(key string) string {
 		switch key {

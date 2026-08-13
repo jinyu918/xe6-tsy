@@ -3,6 +3,7 @@ package segment
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"sync"
 	"testing"
@@ -213,6 +214,27 @@ func TestServicePropagatesProcessorError(t *testing.T) {
 	}
 }
 
+func TestServiceContinuesAfterUnavailableSpeechBinding(t *testing.T) {
+	base := time.Unix(50, 0)
+	source := &fakeSource{frames: []audio.Frame{
+		testFrame(t, 1, base),
+		testFrame(t, 0, base.Add(300*time.Millisecond)),
+		testFrame(t, 1, base.Add(400*time.Millisecond)),
+		testFrame(t, 0, base.Add(700*time.Millisecond)),
+	}}
+	processor := &fakeProcessor{errs: []error{
+		fmt.Errorf("open Turn: %w", pipeline.ErrTurnSpeechBindingUnavailable),
+	}}
+	service := newTestService(t, source, processor)
+
+	if err := service.Run(context.Background(), Request{SessionID: "session-1"}); err != nil {
+		t.Fatalf("Run() error = %v, want nil after recoverable binding error", err)
+	}
+	if len(processor.requests) != 2 {
+		t.Fatalf("processed Turns = %d, want 2", len(processor.requests))
+	}
+}
+
 func TestNewServiceRejectsMissingDependency(t *testing.T) {
 	if _, err := NewService(Dependencies{}); !errors.Is(err, ErrDependencyRequired) {
 		t.Fatalf("NewService() error = %v, want %v", err, ErrDependencyRequired)
@@ -370,6 +392,7 @@ func (s *fakeSource) Close() error {
 type fakeProcessor struct {
 	requests []pipeline.TurnProcessRequest
 	err      error
+	errs     []error
 }
 
 type blockingProcessor struct {
@@ -432,6 +455,9 @@ func (s *trackingSource) Close() error {
 
 func (p *fakeProcessor) ProcessAudio(_ context.Context, request pipeline.TurnProcessRequest) (pipeline.TurnContext, error) {
 	p.requests = append(p.requests, request)
+	if index := len(p.requests) - 1; index < len(p.errs) && p.errs[index] != nil {
+		return pipeline.TurnContext{}, p.errs[index]
+	}
 	if p.err != nil {
 		return pipeline.TurnContext{}, p.err
 	}

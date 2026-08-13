@@ -94,6 +94,7 @@ type RuntimeReporter interface {
 // so TurnOpener can lease the same binding without knowing coordinator storage.
 type SpeechBindingCoordinator interface {
 	pipeline.TurnSpeechBindingAcquirer
+	OpenSession(string)
 	Prepare(context.Context, string, int64, string, string) error
 	CloseSession(string)
 }
@@ -393,6 +394,7 @@ func (m *Manager) Start(ctx context.Context, snapshot session.SessionSnapshot) e
 		return ErrRuntimeInstanceIDRequired
 	}
 	if m.bindings != nil {
+		m.bindings.OpenSession(snapshot.SessionID)
 		configSnapshot, configErr := m.deps.Languages.GetCurrentConfig(ctx, snapshot.SessionID)
 		if configErr != nil {
 			m.closeSpeechBinding(snapshot.SessionID)
@@ -418,6 +420,7 @@ func (m *Manager) Start(ctx context.Context, snapshot session.SessionSnapshot) e
 		m.deps.Now,
 	)
 	if err != nil {
+		m.closeSpeechBinding(snapshot.SessionID)
 		return fmt.Errorf("create mode coordinator: %w", err)
 	}
 	mode.observer = m.deps.ModeCommands
