@@ -40,6 +40,18 @@ func TestAsyncAPIFinalTurnContract(t *testing.T) {
 	if got, want := mapValue(t, properties, "language_config_version")["minimum"], 1; got != want {
 		t.Fatalf("language_config_version minimum = %v, want %d", got, want)
 	}
+	for _, field := range []string{"asr_profile_id", "tts_profile_id"} {
+		profile := mapValue(t, properties, field)
+		if !allowsNull(t, profile) {
+			t.Fatalf("%s must allow null", field)
+		}
+		if got, want := profile["minLength"], 1; got != want {
+			t.Fatalf("%s minLength = %v, want %d", field, got, want)
+		}
+		if required[field] {
+			t.Fatalf("%s must not be required", field)
+		}
+	}
 	if got, want := mapValue(t, properties, "speaker_code")["minLength"], 1; got != want {
 		t.Fatalf("speaker_code minLength = %v, want %d", got, want)
 	}
@@ -88,6 +100,8 @@ func TestAsyncAPIFinalTurnPayloadExamples(t *testing.T) {
 		"source_language":         "zh-CN",
 		"target_language":         "en-US",
 		"language_config_version": int64(1),
+		"asr_profile_id":          "asr_profile_01",
+		"tts_profile_id":          "tts_profile_01",
 		"source_text":             "source",
 		"translated_text":         "translation",
 		"speaker_code":            "speaker_01",
@@ -142,6 +156,20 @@ func TestAsyncAPIFinalTurnPayloadExamples(t *testing.T) {
 				payload["speaker_code"] = ""
 			},
 			wantErr: "speaker_code",
+		},
+		{
+			name: "blank ASR profile ID",
+			mutate: func(payload map[string]any) {
+				payload["asr_profile_id"] = ""
+			},
+			wantErr: "asr_profile_id",
+		},
+		{
+			name: "blank TTS profile ID",
+			mutate: func(payload map[string]any) {
+				payload["tts_profile_id"] = ""
+			},
+			wantErr: "tts_profile_id",
 		},
 	}
 
@@ -207,6 +235,16 @@ func validateFinalTurnPayload(schema, payload map[string]any) error {
 	}
 	if speakerCode, ok := payload["speaker_code"].(string); !ok || speakerCode == "" {
 		return fmt.Errorf("speaker_code must not be empty")
+	}
+	for _, field := range []string{"asr_profile_id", "tts_profile_id"} {
+		value, present := payload[field]
+		if !present || value == nil {
+			continue
+		}
+		profileID, ok := value.(string)
+		if !ok || profileID == "" {
+			return fmt.Errorf("%s must not be empty", field)
+		}
 	}
 	for _, field := range []string{"participant_id", "speaker_label_snapshot", "speaker_confidence"} {
 		if payload[field] == nil && !allowsNullValue(properties[field]) {
