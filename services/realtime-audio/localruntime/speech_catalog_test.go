@@ -7,6 +7,7 @@ import (
 
 	languagesv1 "github.com/1024XEngineer/xe6-tsy/packages/contracts/languages/v1"
 	"github.com/1024XEngineer/xe6-tsy/services/realtime-audio/config"
+	"github.com/1024XEngineer/xe6-tsy/services/realtime-audio/tts"
 )
 
 func TestBuildSpeechRegistrySupportsMultipleProfiles(t *testing.T) {
@@ -46,6 +47,55 @@ func TestBuildSpeechRegistrySupportsMultipleProfiles(t *testing.T) {
 	}
 	if route.ASRProfileID != "asr-secondary" || route.TTSProfileID != "tts-secondary" {
 		t.Fatalf("secondary route = %#v", route)
+	}
+}
+
+func TestBuildSpeechRegistryWithMockTTSKeepsCatalogValidationAndBlocksVendorSynthesis(t *testing.T) {
+	catalog := validSpeechCatalog()
+	registry, _, err := BuildSpeechRegistryWithMockTTS(catalog, config.ProviderConfig{
+		ASR: config.ASRConfig{APIKey: "asr-key", BaseURL: "https://example.com/compatible-mode/v1"},
+	})
+	if err != nil {
+		t.Fatalf("BuildSpeechRegistryWithMockTTS() error = %v", err)
+	}
+	adapter, err := registry.TTS("tts-primary")
+	if err != nil {
+		t.Fatalf("registry.TTS() error = %v", err)
+	}
+	if _, ok := adapter.(*tts.FakeProvider); !ok {
+		t.Fatalf("TTS adapter = %T, want offline fake", adapter)
+	}
+
+	for _, test := range []struct {
+		name   string
+		mutate func(*SpeechCatalog)
+		want   error
+	}{
+		{
+			name: "unsupported provider",
+			mutate: func(catalog *SpeechCatalog) {
+				catalog.TTSProfiles[0].ProviderCode = "unsupported"
+			},
+			want: config.ErrUnsupportedProvider,
+		},
+		{
+			name: "unsupported model",
+			mutate: func(catalog *SpeechCatalog) {
+				catalog.TTSProfiles[0].Model = "unsupported"
+			},
+			want: config.ErrUnsupportedModel,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			catalog := validSpeechCatalog()
+			test.mutate(&catalog)
+			_, _, err := BuildSpeechRegistryWithMockTTS(catalog, config.ProviderConfig{
+				ASR: config.ASRConfig{APIKey: "asr-key", BaseURL: "https://example.com/compatible-mode/v1"},
+			})
+			if !errors.Is(err, test.want) {
+				t.Fatalf("BuildSpeechRegistryWithMockTTS() error = %v, want %v", err, test.want)
+			}
+		})
 	}
 }
 

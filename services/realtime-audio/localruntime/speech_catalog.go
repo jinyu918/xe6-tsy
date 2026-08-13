@@ -8,6 +8,7 @@ import (
 	languagesv1 "github.com/1024XEngineer/xe6-tsy/packages/contracts/languages/v1"
 	"github.com/1024XEngineer/xe6-tsy/services/realtime-audio/config"
 	"github.com/1024XEngineer/xe6-tsy/services/realtime-audio/speech"
+	"github.com/1024XEngineer/xe6-tsy/services/realtime-audio/tts"
 	"golang.org/x/text/language"
 )
 
@@ -82,6 +83,18 @@ func ValidateSpeechCatalog(catalog SpeechCatalog) error {
 // BuildSpeechRegistry constructs every active profile so a later route switch
 // is a registry lookup rather than a provider protocol or credential decision.
 func BuildSpeechRegistry(catalog SpeechCatalog, providerConfig config.ProviderConfig) (*speech.ProviderRegistry, speech.RouteResolver, error) {
+	return buildSpeechRegistry(catalog, providerConfig, false)
+}
+
+// BuildSpeechRegistryWithMockTTS preserves route and profile validation while
+// replacing each turn-bound TTS adapter with an offline provider. It is used by
+// subtitle-only deployments, where creating a binding must not enable a vendor
+// synthesis call even when the profile catalog contains real TTS providers.
+func BuildSpeechRegistryWithMockTTS(catalog SpeechCatalog, providerConfig config.ProviderConfig) (*speech.ProviderRegistry, speech.RouteResolver, error) {
+	return buildSpeechRegistry(catalog, providerConfig, true)
+}
+
+func buildSpeechRegistry(catalog SpeechCatalog, providerConfig config.ProviderConfig, mockTTS bool) (*speech.ProviderRegistry, speech.RouteResolver, error) {
 	if err := ValidateSpeechCatalog(catalog); err != nil {
 		return nil, nil, err
 	}
@@ -103,11 +116,22 @@ func BuildSpeechRegistry(catalog SpeechCatalog, providerConfig config.ProviderCo
 	}
 	ttsRegistrations := make([]speech.TTSProfile, 0, len(catalog.TTSProfiles))
 	for _, profile := range catalog.TTSProfiles {
-		deployment := providerConfig.TTS
-		deployment.SampleRate = profile.OutputSampleRateHz
-		adapter, err := config.BuildTTSProfileAdapter(profile.ProviderCode, profile.Model, profile.VoiceID, deployment)
-		if err != nil {
-			return nil, nil, fmt.Errorf("build TTS profile %q: %w", profile.ID, err)
+		var adapter tts.Provider
+		if mockTTS {
+			if err := config.ValidateTTSProfile(profile.ProviderCode, profile.Model, profile.VoiceID); err != nil {
+				return nil, nil, fmt.Errorf("validate TTS profile %q: %w", profile.ID, err)
+			}
+			adapter = tts.NewFakeProvider(tts.FakeProviderConfig{
+				Result: tts.Result{Provider: "mock-tts", Model: "fake"},
+			})
+		} else {
+			deployment := providerConfig.TTS
+			deployment.SampleRate = profile.OutputSampleRateHz
+			var err error
+			adapter, err = config.BuildTTSProfileAdapter(profile.ProviderCode, profile.Model, profile.VoiceID, deployment)
+			if err != nil {
+				return nil, nil, fmt.Errorf("build TTS profile %q: %w", profile.ID, err)
+			}
 		}
 		ttsRegistrations = append(ttsRegistrations, speech.TTSProfile{
 			Profile: speech.Profile{
