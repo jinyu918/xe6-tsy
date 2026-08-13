@@ -232,11 +232,7 @@ func newControlPlaneHandlerWithConfig(cfg processConfig) (http.Handler, error) {
 	case "opus":
 		audioSink = localruntime.PlaybackAudioSink{Media: connections}
 	case "pcm":
-		sampleRate := providerConfig.TTS.SampleRate
-		if sampleRate <= 0 {
-			sampleRate = 24000
-		}
-		audioSink = &localruntime.DataChannelTTSAudioSink{Media: connections, SampleRate: sampleRate, Failures: metricRegistry}
+		audioSink = &localruntime.DataChannelTTSAudioSink{Media: connections, Failures: metricRegistry}
 	}
 
 	voiceID := strings.TrimSpace(providerConfig.TTS.Voice)

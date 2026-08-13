@@ -43,7 +43,7 @@ func TestMediaConfigDefaultsTTSOutputToQwenSampleRate(t *testing.T) {
 	}
 }
 
-func TestValidateTTSAudioOfferRequiresConfiguredL16Codec(t *testing.T) {
+func TestValidateTTSAudioOfferRequiresBrowserOpusCapability(t *testing.T) {
 	config, err := (MediaConfig{}).normalized()
 	if err != nil {
 		t.Fatalf("MediaConfig.normalized() error = %v", err)
@@ -53,8 +53,8 @@ func TestValidateTTSAudioOfferRequiresConfiguredL16Codec(t *testing.T) {
 		sdp  string
 		want error
 	}{
-		{name: "matching L16", sdp: l16OfferSDP(24_000), want: nil},
-		{name: "opus only", sdp: opusOfferSDP(), want: ErrTTSCodecUnsupported},
+		{name: "browser opus", sdp: opusOfferSDP(), want: nil},
+		{name: "L16 only", sdp: l16OfferSDP(24_000), want: ErrTTSCodecUnsupported},
 		{name: "no audio", sdp: videoOnlyOfferSDP(), want: ErrTTSCodecUnsupported},
 	}
 	for _, test := range tests {
@@ -75,8 +75,8 @@ func TestValidateTTSAudioOfferAcceptsOpusWhenConfigured(t *testing.T) {
 	if err := validateTTSAudioOffer(opusOfferSDP(), config); err != nil {
 		t.Fatalf("validateTTSAudioOffer(opus) error = %v", err)
 	}
-	if err := validateTTSAudioOffer(l16OfferSDP(24_000), config); !errors.Is(err, ErrTTSCodecUnsupported) {
-		t.Fatalf("validateTTSAudioOffer(L16) error = %v, want ErrTTSCodecUnsupported", err)
+	if err := validateTTSAudioOffer(opusOfferWithClockAndChannels(24_000, 1), config); !errors.Is(err, ErrTTSCodecUnsupported) {
+		t.Fatalf("validateTTSAudioOffer(nonstandard Opus) error = %v, want ErrTTSCodecUnsupported", err)
 	}
 }
 
@@ -107,7 +107,7 @@ func TestPionTransportRejectsOfferWithoutTTSCodecBeforeAddingTrack(t *testing.T)
 	if err != nil {
 		t.Fatalf("Create() error = %v", err)
 	}
-	_, err = transport.Answer(context.Background(), SessionDescription{Type: "offer", SDP: opusOfferSDP()})
+	_, err = transport.Answer(context.Background(), SessionDescription{Type: "offer", SDP: l16OfferSDP(24_000)})
 	if !errors.Is(err, ErrTTSCodecUnsupported) {
 		t.Fatalf("Answer() error = %v, want ErrTTSCodecUnsupported", err)
 	}
@@ -126,12 +126,16 @@ func l16OfferSDP(sampleRate int) string {
 }
 
 func opusOfferSDP() string {
+	return opusOfferWithClockAndChannels(48_000, 2)
+}
+
+func opusOfferWithClockAndChannels(clockRate, channels int) string {
 	return "v=0\r\n" +
 		"o=- 0 0 IN IP4 127.0.0.1\r\n" +
 		"s=-\r\n" +
 		"t=0 0\r\n" +
 		"m=audio 9 UDP/TLS/RTP/SAVPF 111\r\n" +
-		"a=rtpmap:111 opus/48000/2\r\n"
+		"a=rtpmap:111 opus/" + fmt.Sprint(clockRate) + "/" + fmt.Sprint(channels) + "\r\n"
 }
 
 func videoOnlyOfferSDP() string {

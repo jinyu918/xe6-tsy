@@ -65,6 +65,6 @@ func (*playbackSinkMedia) AddCandidate(context.Context, webrtc.ICECandidate) err
 func (*playbackSinkMedia) EndCandidates(context.Context) error                     { return nil }
 func (*playbackSinkMedia) Close(context.Context) error                             { return nil }
 func (*playbackSinkMedia) AudioSource() segment.FrameSource                        { return nil }
-func (*playbackSinkMedia) TTSAudioTrack() *webrtc.PionAudioTrack                   { return nil }
+func (*playbackSinkMedia) TTSAudioTrack() playback.AudioTrack                      { return nil }
 func (*playbackSinkMedia) TranslationEvents() *webrtc.PionEventSink                { return nil }
 func (m *playbackSinkMedia) Playback() *playback.Service                           { return m.service }

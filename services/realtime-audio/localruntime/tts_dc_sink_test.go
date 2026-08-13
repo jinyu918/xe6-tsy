@@ -2,19 +2,20 @@ package localruntime
 
 import (
 	"context"
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"sync"
 	"testing"
 
+	"github.com/1024XEngineer/xe6-tsy/services/realtime-audio/audio"
 	"github.com/1024XEngineer/xe6-tsy/services/realtime-audio/pipeline"
 	"github.com/1024XEngineer/xe6-tsy/services/realtime-audio/playback"
 	"github.com/1024XEngineer/xe6-tsy/services/realtime-audio/segment"
+	"github.com/1024XEngineer/xe6-tsy/services/realtime-audio/tts"
 	"github.com/1024XEngineer/xe6-tsy/services/realtime-audio/webrtc"
 )
 
-func TestSplitBytes(t *testing.T) {
+func TestSplitPCMBytes(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
@@ -26,111 +27,40 @@ func TestSplitBytes(t *testing.T) {
 	}{
 		{name: "empty", dataLen: 0, max: 8, wantCount: 0},
 		{name: "exact chunks", dataLen: maxTTSPCMChunkBytes * 2, max: maxTTSPCMChunkBytes, wantCount: 2, wantLast: maxTTSPCMChunkBytes},
-		{name: "remainder", dataLen: maxTTSPCMChunkBytes*2 + 3, max: maxTTSPCMChunkBytes, wantCount: 3, wantLast: 3},
-		{name: "nonpositive max uses default", dataLen: 5, max: 0, wantCount: 1, wantLast: 5},
-		{name: "negative max uses default", dataLen: 5, max: -1, wantCount: 1, wantLast: 5},
-		{name: "smaller max", dataLen: 10, max: 4, wantCount: 3, wantLast: 2},
+		{name: "remainder", dataLen: maxTTSPCMChunkBytes*2 + 4, max: maxTTSPCMChunkBytes, wantCount: 3, wantLast: 4},
+		{name: "nonpositive max uses default", dataLen: 6, max: 0, wantCount: 1, wantLast: 6},
+		{name: "negative max uses default", dataLen: 6, max: -1, wantCount: 1, wantLast: 6},
+		{name: "odd limit rounds down", dataLen: 6, max: 3, wantCount: 3, wantLast: 2},
 	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
-			data := make([]byte, tt.dataLen)
-			pieces := splitBytes(data, tt.max)
-			if len(pieces) != tt.wantCount {
-				t.Fatalf("len(pieces)=%d, want %d", len(pieces), tt.wantCount)
+			pieces, err := splitPCMBytes(make([]byte, test.dataLen), test.max)
+			if err != nil {
+				t.Fatalf("splitPCMBytes() error = %v", err)
 			}
-			if tt.wantCount == 0 {
+			if len(pieces) != test.wantCount {
+				t.Fatalf("len(pieces)=%d, want %d", len(pieces), test.wantCount)
+			}
+			if test.wantCount == 0 {
 				return
 			}
-			if len(pieces[len(pieces)-1]) != tt.wantLast {
-				t.Fatalf("last=%d, want %d", len(pieces[len(pieces)-1]), tt.wantLast)
+			if len(pieces[len(pieces)-1]) != test.wantLast {
+				t.Fatalf("last=%d, want %d", len(pieces[len(pieces)-1]), test.wantLast)
+			}
+			for _, piece := range pieces {
+				if len(piece)%2 != 0 {
+					t.Fatalf("piece length = %d, want a complete PCM sample", len(piece))
+				}
 			}
 		})
 	}
-}
 
-func TestWavPCMData(t *testing.T) {
-	t.Parallel()
-
-	pcm := []byte{1, 0, 2, 0, 3, 0, 4, 0}
-
-	tests := []struct {
-		name string
-		raw  []byte
-		ok   bool
-		want []byte
-	}{
-		{name: "valid wav", raw: makeWAV(pcm), ok: true, want: pcm},
-		{name: "too short", raw: []byte("RIFF"), ok: false},
-		{name: "bad riff", raw: append([]byte("XIFF"), make([]byte, 40)...), ok: false},
-		{name: "bad wave", raw: func() []byte {
-			b := makeWAV(pcm)
-			copy(b[8:], []byte("NOPE"))
-			return b
-		}(), ok: false},
-		{name: "truncated data chunk", raw: func() []byte {
-			b := makeWAV(pcm)
-			return b[:40]
-		}(), ok: false},
-		{name: "oversize chunk", raw: func() []byte {
-			b := makeWAV(pcm)
-			binary.LittleEndian.PutUint32(b[40:], 1<<30)
-			return b
-		}(), ok: false},
-		{name: "no data chunk", raw: func() []byte {
-			b := make([]byte, 44)
-			copy(b[0:], []byte("RIFF"))
-			binary.LittleEndian.PutUint32(b[4:], 36)
-			copy(b[8:], []byte("WAVEfmt "))
-			binary.LittleEndian.PutUint32(b[16:], 16)
-			copy(b[36:], []byte("LIST"))
-			binary.LittleEndian.PutUint32(b[40:], 0)
-			return b
-		}(), ok: false},
-		{name: "odd-sized chunk padding", raw: makeWAVWithOddListChunk(pcm), ok: true, want: pcm},
+	if _, err := splitPCMBytes([]byte{1}, 8); !errors.Is(err, audio.ErrPCMAlignment) {
+		t.Fatalf("splitPCMBytes(odd PCM) error = %v, want %v", err, audio.ErrPCMAlignment)
 	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			got, ok := wavPCMData(tt.raw)
-			if ok != tt.ok {
-				t.Fatalf("ok=%v, want %v", ok, tt.ok)
-			}
-			if !tt.ok {
-				return
-			}
-			if string(got) != string(tt.want) {
-				t.Fatalf("pcm = %v, want %v", got, tt.want)
-			}
-		})
-	}
-}
-
-func TestNormalizeTTSAudio(t *testing.T) {
-	t.Parallel()
-
-	pcm := []byte{1, 0, 2, 0}
-	wav := makeWAV(pcm)
-	norm := normalizeTTSAudio(wav, "")
-	if norm.encoding != "pcm_s16le" || string(norm.data) != string(pcm) {
-		t.Fatalf("wav normalize = %#v", norm)
-	}
-
-	raw := []byte{0xff, 0xfb, 1, 2, 3, 4}
-	norm = normalizeTTSAudio(raw, "")
-	if norm.encoding != "audio_container" || string(norm.data) != string(raw) {
-		t.Fatalf("container normalize = %#v", norm)
-	}
-}
-
-func TestNormalizeTTSAudioHonorsDeclaredRawPCM(t *testing.T) {
-	t.Parallel()
-
-	rawPCM := []byte{0x52, 0x49, 0x46, 0x46, 0x01, 0x00}
-	norm := normalizeTTSAudio(rawPCM, "pcm_s16le")
-	if norm.encoding != "pcm_s16le" || string(norm.data) != string(rawPCM) {
-		t.Fatalf("raw PCM normalize = %#v", norm)
+	if _, err := splitPCMBytes([]byte{1, 0}, 1); err == nil {
+		t.Fatal("splitPCMBytes(limit smaller than one sample) error = nil")
 	}
 }
 
@@ -142,71 +72,54 @@ func TestDataChannelTTSAudioSinkPublishCompleteCancel(t *testing.T) {
 		sink := &DataChannelTTSAudioSink{}
 		canceled, cancel := context.WithCancel(context.Background())
 		cancel()
-		if err := sink.Publish(canceled, pipeline.AudioChunk{PlaybackID: "p1", Data: []byte{1}}); !errors.Is(err, context.Canceled) {
+		if err := sink.Publish(canceled, canonicalTTSChunk("", "p1", []byte{1, 0})); !errors.Is(err, context.Canceled) {
 			t.Fatalf("canceled Publish error = %v", err)
 		}
-		if err := sink.Publish(context.Background(), pipeline.AudioChunk{PlaybackID: "", Data: []byte{1}}); err != nil {
+		if err := sink.Publish(context.Background(), canonicalTTSChunk("", "", []byte{1, 0})); err != nil {
 			t.Fatalf("empty playback Publish error = %v", err)
 		}
-		if err := sink.Publish(context.Background(), pipeline.AudioChunk{PlaybackID: "p1", Data: nil}); err != nil {
+		if err := sink.Publish(context.Background(), canonicalTTSChunk("", "p1", nil)); err != nil {
 			t.Fatalf("empty data Publish error = %v", err)
 		}
 	})
 
-	t.Run("complete with nil media ships normalized chunks without error", func(t *testing.T) {
+	t.Run("complete with nil media accepts canonical chunks", func(t *testing.T) {
 		t.Parallel()
-		sink := &DataChannelTTSAudioSink{SampleRate: 0}
+		sink := &DataChannelTTSAudioSink{}
 		pcm := make([]byte, maxTTSPCMChunkBytes+4)
-		for i := range pcm {
-			pcm[i] = byte(i)
+		if err := sink.Publish(context.Background(), canonicalTTSChunk("session-1", "playback-1", pcm)); err != nil {
+			t.Fatalf("Publish() error = %v", err)
 		}
-		if err := sink.Publish(context.Background(), pipeline.AudioChunk{
-			SessionID:  "session-1",
-			TurnID:     "turn-1",
-			PlaybackID: "playback-1",
-			Data:       makeWAV(pcm),
-		}); err != nil {
-			t.Fatalf("Publish: %v", err)
-		}
-		if err := sink.Publish(context.Background(), pipeline.AudioChunk{
-			SessionID:  "session-2",
-			TurnID:     "turn-2",
-			PlaybackID: "playback-1",
-			Data:       []byte{},
-		}); err != nil {
-			t.Fatalf("Publish empty append: %v", err)
-		}
-		// Empty Data is ignored; buffer still holds the WAV from the first publish.
-		if err := sink.Complete(context.Background(), "", "playback-1"); err != nil {
-			t.Fatalf("Complete: %v", err)
-		}
-		if err := sink.Complete(context.Background(), "session-2", "playback-1"); err != nil {
-			t.Fatalf("Complete empty: %v", err)
+		if err := sink.Complete(context.Background(), "session-1", "playback-1"); err != nil {
+			t.Fatalf("Complete() error = %v", err)
 		}
 	})
 
-	t.Run("complete unknown container with media miss", func(t *testing.T) {
+	t.Run("rejects noncanonical media", func(t *testing.T) {
 		t.Parallel()
-		sink := &DataChannelTTSAudioSink{
-			Media:      stubMediaLookup{},
-			SampleRate: 16000,
+		tests := []struct {
+			name  string
+			chunk pipeline.AudioChunk
+		}{
+			{name: "container", chunk: pipeline.AudioChunk{PlaybackID: "p1", Encoding: "audio/wav", SampleRate: audio.TTSSampleRate, Channels: 1, Data: []byte{1, 0}}},
+			{name: "wrong rate", chunk: pipeline.AudioChunk{PlaybackID: "p1", Encoding: audio.PCMEncoding, SampleRate: 16_000, Channels: 1, Data: []byte{1, 0}}},
+			{name: "stereo", chunk: pipeline.AudioChunk{PlaybackID: "p1", Encoding: audio.PCMEncoding, SampleRate: audio.TTSSampleRate, Channels: 2, Data: []byte{1, 0, 2, 0}}},
+			{name: "partial sample", chunk: pipeline.AudioChunk{PlaybackID: "p1", Encoding: audio.PCMEncoding, SampleRate: audio.TTSSampleRate, Channels: 1, Data: []byte{1}}},
 		}
-		if err := sink.Publish(context.Background(), pipeline.AudioChunk{
-			SessionID:  "session-1",
-			PlaybackID: "playback-1",
-			Data:       []byte{0xff, 0xfb, 1, 2, 3, 4},
-		}); err != nil {
-			t.Fatalf("Publish: %v", err)
-		}
-		if err := sink.Complete(context.Background(), "session-1", "playback-1"); err != nil {
-			t.Fatalf("Complete with unavailable media = %v", err)
+		for _, test := range tests {
+			t.Run(test.name, func(t *testing.T) {
+				err := (&DataChannelTTSAudioSink{}).Publish(context.Background(), test.chunk)
+				if !errors.Is(err, tts.ErrAudioChunkInvalid) {
+					t.Fatalf("Publish() error = %v, want %v", err, tts.ErrAudioChunkInvalid)
+				}
+			})
 		}
 	})
 
 	t.Run("complete canceled context", func(t *testing.T) {
 		t.Parallel()
 		sink := &DataChannelTTSAudioSink{}
-		_ = sink.Publish(context.Background(), pipeline.AudioChunk{PlaybackID: "p1", Data: []byte{1}})
+		_ = sink.Publish(context.Background(), canonicalTTSChunk("s1", "p1", []byte{1, 0}))
 		canceled, cancel := context.WithCancel(context.Background())
 		cancel()
 		if err := sink.Complete(canceled, "s1", "p1"); !errors.Is(err, context.Canceled) {
@@ -214,48 +127,42 @@ func TestDataChannelTTSAudioSinkPublishCompleteCancel(t *testing.T) {
 		}
 	})
 
-	t.Run("cancel drops buffer and surfaces ctx error", func(t *testing.T) {
+	t.Run("cancel drops buffer and surfaces context error", func(t *testing.T) {
 		t.Parallel()
 		sink := &DataChannelTTSAudioSink{}
-		_ = sink.Publish(context.Background(), pipeline.AudioChunk{SessionID: "s1", PlaybackID: "p1", Data: []byte{1, 2, 3}})
+		_ = sink.Publish(context.Background(), canonicalTTSChunk("s1", "p1", []byte{1, 0}))
 		canceled, cancel := context.WithCancel(context.Background())
 		cancel()
 		if err := sink.Cancel(canceled, "s1", "p1", "interrupt"); !errors.Is(err, context.Canceled) {
-			t.Fatalf("Cancel = %v", err)
+			t.Fatalf("Cancel() error = %v", err)
 		}
 		if err := sink.Complete(context.Background(), "s1", "p1"); err != nil {
-			t.Fatalf("Complete after cancel = %v", err)
+			t.Fatalf("Complete after cancel error = %v", err)
 		}
 	})
 
-	t.Run("publish with nil translation events is best-effort", func(t *testing.T) {
+	t.Run("publish with nil translation events is best effort", func(t *testing.T) {
 		t.Parallel()
 		sink := &DataChannelTTSAudioSink{
 			Media: mediaLookupFunc(func(context.Context, string) (webrtc.MediaTransport, error) {
 				return &fakeMediaTransport{}, nil
 			}),
 		}
-		_ = sink.Publish(context.Background(), pipeline.AudioChunk{
-			SessionID:  "session-1",
-			PlaybackID: "playback-1",
-			Data:       []byte{1, 2, 3, 4},
-		})
+		if err := sink.Publish(context.Background(), canonicalTTSChunk("session-1", "playback-1", []byte{1, 0, 2, 0})); err != nil {
+			t.Fatalf("Publish() error = %v", err)
+		}
 		if err := sink.Complete(context.Background(), "session-1", "playback-1"); err != nil {
-			t.Fatalf("Complete with nil events = %v", err)
+			t.Fatalf("Complete with nil events error = %v", err)
 		}
 	})
 }
 
 func TestDataChannelTTSAudioSinkInterruptCurrentDropsSessionBuffers(t *testing.T) {
 	sink := &DataChannelTTSAudioSink{}
-	if err := sink.Publish(context.Background(), pipeline.AudioChunk{
-		SessionID: "session-1", PlaybackID: "playback-1", Data: []byte{1},
-	}); err != nil {
+	if err := sink.Publish(context.Background(), canonicalTTSChunk("session-1", "playback-1", []byte{1, 0})); err != nil {
 		t.Fatalf("Publish(session-1) error = %v", err)
 	}
-	if err := sink.Publish(context.Background(), pipeline.AudioChunk{
-		SessionID: "session-2", PlaybackID: "playback-2", Data: []byte{2},
-	}); err != nil {
+	if err := sink.Publish(context.Background(), canonicalTTSChunk("session-2", "playback-2", []byte{2, 0})); err != nil {
 		t.Fatalf("Publish(session-2) error = %v", err)
 	}
 	if err := sink.InterruptCurrent(context.Background(), "session-1", "wake_word_detected"); err != nil {
@@ -267,9 +174,7 @@ func TestDataChannelTTSAudioSinkInterruptCurrentDropsSessionBuffers(t *testing.T
 	if _, ok := sink.buffers[ttsPlaybackKey{sessionID: "session-1", playbackID: "playback-1"}]; ok {
 		t.Fatal("session-1 playback buffer was not removed")
 	}
-	if err := sink.Publish(context.Background(), pipeline.AudioChunk{
-		SessionID: "session-1", PlaybackID: "playback-1", Data: []byte{3},
-	}); err != nil {
+	if err := sink.Publish(context.Background(), canonicalTTSChunk("session-1", "playback-1", []byte{3, 0})); err != nil {
 		t.Fatalf("Publish(late chunk) error = %v", err)
 	}
 	if _, ok := sink.buffers[ttsPlaybackKey{sessionID: "session-1", playbackID: "playback-1"}]; ok {
@@ -285,21 +190,17 @@ func TestDataChannelTTSAudioSinkInterruptCurrentDropsSessionBuffers(t *testing.T
 
 func TestDataChannelTTSAudioSinkInterruptionIsScopedToSession(t *testing.T) {
 	sink := &DataChannelTTSAudioSink{}
-	if err := sink.Publish(context.Background(), pipeline.AudioChunk{
-		SessionID: "session-1", PlaybackID: "shared-playback", Data: []byte{1},
-	}); err != nil {
+	if err := sink.Publish(context.Background(), canonicalTTSChunk("session-1", "shared-playback", []byte{1, 0})); err != nil {
 		t.Fatalf("Publish(session-1) error = %v", err)
 	}
-	if err := sink.Publish(context.Background(), pipeline.AudioChunk{
-		SessionID: "session-2", PlaybackID: "shared-playback", Data: []byte{2},
-	}); err != nil {
+	if err := sink.Publish(context.Background(), canonicalTTSChunk("session-2", "shared-playback", []byte{2, 0})); err != nil {
 		t.Fatalf("Publish(session-2) error = %v", err)
 	}
 	if err := sink.InterruptCurrent(context.Background(), "session-1", "wake_word_detected"); err != nil {
 		t.Fatalf("InterruptCurrent() error = %v", err)
 	}
 	buffer := sink.buffers[ttsPlaybackKey{sessionID: "session-2", playbackID: "shared-playback"}]
-	if buffer == nil || string(buffer.pcm) != string([]byte{2}) {
+	if buffer == nil || string(buffer.pcm) != string([]byte{2, 0}) {
 		t.Fatalf("another session buffer = %#v, want retained session-2 audio", buffer)
 	}
 }
@@ -311,22 +212,15 @@ func TestDataChannelTTSAudioSinkSeparatesSamePlaybackIDAcrossSessions(t *testing
 	}
 	var published []publishedAudio
 	sink := &DataChannelTTSAudioSink{
-		publishAudio: func(
-			_ context.Context,
-			sessionID, _, _ string,
-			_ int64,
-			_ bool,
-			_ string,
-			data []byte,
-		) error {
+		publishAudio: func(_ context.Context, sessionID, _, _ string, _ int64, _ bool, data []byte) error {
 			published = append(published, publishedAudio{sessionID: sessionID, data: append([]byte(nil), data...)})
 			return nil
 		},
 	}
 
 	chunks := []pipeline.AudioChunk{
-		{SessionID: "session-1", PlaybackID: "shared-playback", Encoding: "pcm_s16le", Data: []byte{1, 2}},
-		{SessionID: "session-2", PlaybackID: "shared-playback", Encoding: "pcm_s16le", Data: []byte{3, 4}},
+		canonicalTTSChunk("session-1", "shared-playback", []byte{1, 0}),
+		canonicalTTSChunk("session-2", "shared-playback", []byte{3, 0}),
 	}
 	start := make(chan struct{})
 	errs := make(chan error, len(chunks))
@@ -360,10 +254,10 @@ func TestDataChannelTTSAudioSinkSeparatesSamePlaybackIDAcrossSessions(t *testing
 	if len(published) != 2 {
 		t.Fatalf("published audio count = %d, want 2", len(published))
 	}
-	if published[0].sessionID != "session-1" || string(published[0].data) != string([]byte{1, 2}) {
+	if published[0].sessionID != "session-1" || string(published[0].data) != string([]byte{1, 0}) {
 		t.Fatalf("first published audio = %#v, want session-1 data only", published[0])
 	}
-	if published[1].sessionID != "session-2" || string(published[1].data) != string([]byte{3, 4}) {
+	if published[1].sessionID != "session-2" || string(published[1].data) != string([]byte{3, 0}) {
 		t.Fatalf("second published audio = %#v, want session-2 data only", published[1])
 	}
 }
@@ -371,8 +265,8 @@ func TestDataChannelTTSAudioSinkSeparatesSamePlaybackIDAcrossSessions(t *testing
 func TestDataChannelTTSAudioSinkCancelIsScopedToSessionWithSharedPlaybackID(t *testing.T) {
 	sink := &DataChannelTTSAudioSink{}
 	for _, chunk := range []pipeline.AudioChunk{
-		{SessionID: "session-1", PlaybackID: "shared-playback", Data: []byte{1}},
-		{SessionID: "session-2", PlaybackID: "shared-playback", Data: []byte{2}},
+		canonicalTTSChunk("session-1", "shared-playback", []byte{1, 0}),
+		canonicalTTSChunk("session-2", "shared-playback", []byte{2, 0}),
 	} {
 		if err := sink.Publish(context.Background(), chunk); err != nil {
 			t.Fatalf("Publish(%s) error = %v", chunk.SessionID, err)
@@ -386,7 +280,7 @@ func TestDataChannelTTSAudioSinkCancelIsScopedToSessionWithSharedPlaybackID(t *t
 		t.Fatal("canceled session buffer was retained")
 	}
 	buffer := sink.buffers[ttsPlaybackKey{sessionID: "session-2", playbackID: "shared-playback"}]
-	if buffer == nil || string(buffer.pcm) != string([]byte{2}) {
+	if buffer == nil || string(buffer.pcm) != string([]byte{2, 0}) {
 		t.Fatalf("uncanceled session buffer = %#v, want session-2 audio", buffer)
 	}
 }
@@ -396,14 +290,7 @@ func TestDataChannelTTSAudioSinkInterruptCurrentStopsPublishingChunks(t *testing
 	releaseFirst := make(chan struct{})
 	published := make(chan int64, 2)
 	sink := &DataChannelTTSAudioSink{
-		publishAudio: func(
-			_ context.Context,
-			_, _, _ string,
-			sequence int64,
-			_ bool,
-			_ string,
-			_ []byte,
-		) error {
+		publishAudio: func(_ context.Context, _, _, _ string, sequence int64, _ bool, _ []byte) error {
 			published <- sequence
 			if sequence == 1 {
 				close(firstStarted)
@@ -412,10 +299,8 @@ func TestDataChannelTTSAudioSinkInterruptCurrentStopsPublishingChunks(t *testing
 			return nil
 		},
 	}
-	audioData := make([]byte, maxTTSPCMChunkBytes+1)
-	if err := sink.Publish(context.Background(), pipeline.AudioChunk{
-		SessionID: "session-1", PlaybackID: "playback-1", Data: audioData, Encoding: "pcm_s16le",
-	}); err != nil {
+	audioData := make([]byte, maxTTSPCMChunkBytes+2)
+	if err := sink.Publish(context.Background(), canonicalTTSChunk("session-1", "playback-1", audioData)); err != nil {
 		t.Fatalf("Publish() error = %v", err)
 	}
 	complete := make(chan error, 1)
@@ -468,7 +353,7 @@ func TestDataChannelTTSAudioSinkPublishingInterruptSurvivesTombstoneEviction(t *
 func TestDataChannelTTSAudioSinkCountsUnavailableChannel(t *testing.T) {
 	failures := &recordingDataChannelFailures{}
 	sink := &DataChannelTTSAudioSink{Failures: failures}
-	if err := sink.publish(t.Context(), "session-1", "playback-1", "turn-1", 1, true, "pcm_s16le", []byte{1, 2}); err != nil {
+	if err := sink.publish(t.Context(), "session-1", "playback-1", "turn-1", 1, true, []byte{1, 0}); err != nil {
 		t.Fatalf("publish() error = %v", err)
 	}
 	if failures.calls != 1 {
@@ -476,45 +361,12 @@ func TestDataChannelTTSAudioSinkCountsUnavailableChannel(t *testing.T) {
 	}
 }
 
-func makeWAV(pcm []byte) []byte {
-	buf := make([]byte, 44+len(pcm))
-	copy(buf[0:], []byte("RIFF"))
-	binary.LittleEndian.PutUint32(buf[4:], uint32(36+len(pcm)))
-	copy(buf[8:], []byte("WAVEfmt "))
-	binary.LittleEndian.PutUint32(buf[16:], 16)
-	binary.LittleEndian.PutUint16(buf[20:], 1)
-	binary.LittleEndian.PutUint16(buf[22:], 1)
-	binary.LittleEndian.PutUint32(buf[24:], 24000)
-	binary.LittleEndian.PutUint32(buf[28:], 48000)
-	binary.LittleEndian.PutUint16(buf[32:], 2)
-	binary.LittleEndian.PutUint16(buf[34:], 16)
-	copy(buf[36:], []byte("data"))
-	binary.LittleEndian.PutUint32(buf[40:], uint32(len(pcm)))
-	copy(buf[44:], pcm)
-	return buf
-}
-
-// makeWAVWithOddListChunk inserts an odd-sized LIST chunk before data so the
-// pad-byte branch in wavPCMData is exercised.
-func makeWAVWithOddListChunk(pcm []byte) []byte {
-	listPayload := []byte{1} // odd size
-	buf := make([]byte, 12+8+16+8+len(listPayload)+1+8+len(pcm))
-	copy(buf[0:], []byte("RIFF"))
-	binary.LittleEndian.PutUint32(buf[4:], uint32(len(buf)-8))
-	copy(buf[8:], []byte("WAVE"))
-	offset := 12
-	copy(buf[offset:], []byte("fmt "))
-	binary.LittleEndian.PutUint32(buf[offset+4:], 16)
-	offset += 8 + 16
-	copy(buf[offset:], []byte("LIST"))
-	binary.LittleEndian.PutUint32(buf[offset+4:], uint32(len(listPayload)))
-	offset += 8
-	copy(buf[offset:], listPayload)
-	offset += len(listPayload) + 1 // pad
-	copy(buf[offset:], []byte("data"))
-	binary.LittleEndian.PutUint32(buf[offset+4:], uint32(len(pcm)))
-	copy(buf[offset+8:], pcm)
-	return buf
+func canonicalTTSChunk(sessionID, playbackID string, pcm []byte) pipeline.AudioChunk {
+	return pipeline.AudioChunk{
+		SessionID: sessionID, PlaybackID: playbackID,
+		Encoding: audio.PCMEncoding, SampleRate: audio.TTSSampleRate, Channels: audio.MonoChannels,
+		Data: pcm,
+	}
 }
 
 type mediaLookupFunc func(ctx context.Context, sessionID string) (webrtc.MediaTransport, error)
@@ -535,6 +387,6 @@ func (*fakeMediaTransport) AddCandidate(context.Context, webrtc.ICECandidate) er
 func (*fakeMediaTransport) EndCandidates(context.Context) error                     { return nil }
 func (*fakeMediaTransport) Close(context.Context) error                             { return nil }
 func (f *fakeMediaTransport) AudioSource() segment.FrameSource                      { return f.source }
-func (*fakeMediaTransport) TTSAudioTrack() *webrtc.PionAudioTrack                   { return nil }
+func (*fakeMediaTransport) TTSAudioTrack() playback.AudioTrack                      { return nil }
 func (f *fakeMediaTransport) TranslationEvents() *webrtc.PionEventSink              { return f.events }
 func (*fakeMediaTransport) Playback() *playback.Service                             { return nil }

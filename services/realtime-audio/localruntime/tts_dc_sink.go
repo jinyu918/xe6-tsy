@@ -3,11 +3,11 @@ package localruntime
 import (
 	"context"
 	"encoding/base64"
-	"encoding/binary"
 	"fmt"
 	"sync"
 	"time"
 
+	"github.com/1024XEngineer/xe6-tsy/services/realtime-audio/audio"
 	"github.com/1024XEngineer/xe6-tsy/services/realtime-audio/pipeline"
 )
 
@@ -17,15 +17,13 @@ const (
 	maxSettledPlaybackTombstones = 128
 )
 
-// DataChannelTTSAudioSink buffers one playback's audio, then ships DC-safe
-// chunks. The browser reassembles by playback_id before decoding/playing so
-// WAV/MP3 containers are never split mid-frame.
+// DataChannelTTSAudioSink buffers canonical TTS PCM and publishes fixed-format
+// chunks for browser playback.
 //
 // PipelineService calls Complete via AudioPlaybackLifecycle after TTS finishes.
 type DataChannelTTSAudioSink struct {
-	Media      MediaLookup
-	SampleRate int
-	Failures   DataChannelFailureObserver
+	Media    MediaLookup
+	Failures DataChannelFailureObserver
 
 	mu           sync.Mutex
 	buffers      map[ttsPlaybackKey]*ttsBuffer
@@ -44,7 +42,6 @@ var _ interface {
 type ttsBuffer struct {
 	sessionID string
 	turnID    string
-	encoding  string
 	pcm       []byte
 }
 
@@ -60,7 +57,6 @@ type ttsAudioPublisher func(
 	string,
 	int64,
 	bool,
-	string,
 	[]byte,
 ) error
 
@@ -86,6 +82,9 @@ func (s *DataChannelTTSAudioSink) Publish(ctx context.Context, chunk pipeline.Au
 	if chunk.PlaybackID == "" || len(chunk.Data) == 0 {
 		return nil
 	}
+	if err := chunk.ValidateCanonicalPCM(); err != nil {
+		return fmt.Errorf("validate canonical TTS PCM: %w", err)
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	key := ttsPlaybackKey{sessionID: chunk.SessionID, playbackID: chunk.PlaybackID}
@@ -105,9 +104,6 @@ func (s *DataChannelTTSAudioSink) Publish(ctx context.Context, chunk pipeline.Au
 	}
 	if chunk.SessionID != "" {
 		buf.sessionID = chunk.SessionID
-	}
-	if chunk.Encoding != "" {
-		buf.encoding = chunk.Encoding
 	}
 	buf.pcm = append(buf.pcm, chunk.Data...)
 	return nil
@@ -138,11 +134,10 @@ func (s *DataChannelTTSAudioSink) Complete(ctx context.Context, sessionID, playb
 	s.mu.Unlock()
 	defer s.finishPublishing(key)
 
-	// Prefer raw PCM when the provider returned a complete WAV; keeps browser
-	// playback on the pcm_s16le path. Containers that are not WAV stay intact
-	// and are reassembled client-side before decodeAudioData.
-	audio := normalizeTTSAudio(buf.pcm, buf.encoding)
-	pieces := splitBytes(audio.data, maxTTSPCMChunkBytes)
+	pieces, err := splitPCMBytes(buf.pcm, maxTTSPCMChunkBytes)
+	if err != nil {
+		return fmt.Errorf("split canonical TTS PCM: %w", err)
+	}
 	for i, piece := range pieces {
 		if s.playbackSettled(key) {
 			return nil
@@ -151,7 +146,7 @@ func (s *DataChannelTTSAudioSink) Complete(ctx context.Context, sessionID, playb
 		if publish == nil {
 			publish = s.publish
 		}
-		if err := publish(ctx, sessionID, playbackID, buf.turnID, int64(i+1), i == len(pieces)-1, audio.encoding, piece); err != nil {
+		if err := publish(ctx, sessionID, playbackID, buf.turnID, int64(i+1), i == len(pieces)-1, piece); err != nil {
 			return err
 		}
 	}
@@ -273,51 +268,19 @@ func (s *DataChannelTTSAudioSink) releaseSettledLocked(key ttsPlaybackKey) {
 	}
 }
 
-type normalizedTTSAudio struct {
-	data     []byte
-	encoding string
-}
-
-func normalizeTTSAudio(raw []byte, declaredEncoding string) normalizedTTSAudio {
-	if declaredEncoding == "pcm_s16le" {
-		return normalizedTTSAudio{data: raw, encoding: declaredEncoding}
-	}
-	if pcm, ok := wavPCMData(raw); ok {
-		return normalizedTTSAudio{data: pcm, encoding: "pcm_s16le"}
-	}
-	// Unknown / MP3 / partial stream: ship bytes as-is; browser reassembles.
-	return normalizedTTSAudio{data: raw, encoding: "audio_container"}
-}
-
-func wavPCMData(raw []byte) ([]byte, bool) {
-	if len(raw) < 44 || string(raw[0:4]) != "RIFF" || string(raw[8:12]) != "WAVE" {
-		return nil, false
-	}
-	offset := 12
-	for offset+8 <= len(raw) {
-		chunkID := string(raw[offset : offset+4])
-		chunkSize := int(binary.LittleEndian.Uint32(raw[offset+4 : offset+8]))
-		offset += 8
-		if chunkSize < 0 || offset+chunkSize > len(raw) {
-			return nil, false
-		}
-		if chunkID == "data" {
-			return append([]byte(nil), raw[offset:offset+chunkSize]...), true
-		}
-		offset += chunkSize
-		if chunkSize%2 == 1 {
-			offset++
-		}
-	}
-	return nil, false
-}
-
-func splitBytes(data []byte, max int) [][]byte {
+func splitPCMBytes(data []byte, max int) ([][]byte, error) {
 	if len(data) == 0 {
-		return nil
+		return nil, nil
+	}
+	if len(data)%2 != 0 {
+		return nil, audio.ErrPCMAlignment
 	}
 	if max <= 0 {
 		max = maxTTSPCMChunkBytes
+	}
+	max -= max % 2
+	if max < 2 {
+		return nil, fmt.Errorf("PCM chunk limit must fit one 16-bit sample")
 	}
 	pieces := make([][]byte, 0, (len(data)+max-1)/max)
 	for len(data) > 0 {
@@ -328,7 +291,7 @@ func splitBytes(data []byte, max int) [][]byte {
 		pieces = append(pieces, append([]byte(nil), data[:n]...))
 		data = data[n:]
 	}
-	return pieces
+	return pieces, nil
 }
 
 func (s *DataChannelTTSAudioSink) publish(
@@ -336,9 +299,11 @@ func (s *DataChannelTTSAudioSink) publish(
 	sessionID, playbackID, turnID string,
 	sequence int64,
 	final bool,
-	encoding string,
 	pcm []byte,
 ) error {
+	if err := audio.ValidatePCM(pcm, audio.TTSSampleRate, audio.MonoChannels); err != nil {
+		return fmt.Errorf("validate canonical TTS PCM: %w", err)
+	}
 	if s.Media == nil || len(pcm) == 0 {
 		if len(pcm) > 0 {
 			s.recordFailure()
@@ -355,22 +320,15 @@ func (s *DataChannelTTSAudioSink) publish(
 		s.recordFailure()
 		return nil
 	}
-	rate := s.SampleRate
-	if rate <= 0 {
-		rate = 24000
-	}
-	if encoding == "" {
-		encoding = "pcm_s16le"
-	}
 	payload := FrontendTTSAudio{
 		Type:       "tts.audio",
 		Event:      "tts.audio",
 		PlaybackID: playbackID,
 		SessionID:  sessionID,
 		TurnID:     turnID,
-		SampleRate: rate,
-		Channels:   1,
-		Encoding:   encoding,
+		SampleRate: audio.TTSSampleRate,
+		Channels:   audio.MonoChannels,
+		Encoding:   audio.PCMEncoding,
 		PCMBase64:  base64.StdEncoding.EncodeToString(pcm),
 		SequenceNo: sequence,
 		Final:      final,

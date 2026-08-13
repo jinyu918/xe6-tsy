@@ -948,8 +948,8 @@ type mediaFakeTransport struct {
 	fakeTransport
 }
 
-func (*mediaFakeTransport) AudioSource() segment.FrameSource { return nil }
-func (*mediaFakeTransport) TTSAudioTrack() *PionAudioTrack   { return nil }
+func (*mediaFakeTransport) AudioSource() segment.FrameSource   { return nil }
+func (*mediaFakeTransport) TTSAudioTrack() playback.AudioTrack { return nil }
 func (*mediaFakeTransport) TranslationEvents() *PionEventSink {
 	return nil
 }
