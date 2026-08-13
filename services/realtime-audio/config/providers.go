@@ -77,25 +77,41 @@ func BuildASRProfileAdapter(providerCode, model string, deployment ASRConfig) (a
 // immutable model and voice selection from one database speech profile. It
 // rejects empty profile values before vendor constructors can apply defaults.
 func BuildTTSProfileAdapter(providerCode, model, voiceID string, deployment TTSConfig) (tts.Provider, error) {
-	model = strings.TrimSpace(model)
-	if model == "" {
-		return nil, ErrSpeechProfileModelRequired
-	}
-	voiceID = strings.TrimSpace(voiceID)
-	if voiceID == "" {
-		return nil, ErrSpeechProfileVoiceRequired
-	}
-	provider := ProviderName(strings.ToLower(strings.TrimSpace(providerCode)))
-	if provider != ProviderAliyun {
-		return nil, fmt.Errorf("%w: TTS speech profile provider %q", ErrUnsupportedProvider, providerCode)
-	}
-	if !supportedTTSProfileModel(model) {
-		return nil, fmt.Errorf("%w: TTS speech profile model %q", ErrUnsupportedModel, model)
+	provider, model, voiceID, err := normalizeTTSProfile(providerCode, model, voiceID)
+	if err != nil {
+		return nil, err
 	}
 	deployment.Provider = provider
 	deployment.Model = model
 	deployment.Voice = voiceID
 	return buildTTS(deployment, nil)
+}
+
+// ValidateTTSProfile checks the non-secret fields selected by a speech catalog.
+// Subtitle-only runtimes use it before registering an offline adapter, so they
+// reject unsupported catalog entries without requiring vendor credentials.
+func ValidateTTSProfile(providerCode, model, voiceID string) error {
+	_, _, _, err := normalizeTTSProfile(providerCode, model, voiceID)
+	return err
+}
+
+func normalizeTTSProfile(providerCode, model, voiceID string) (ProviderName, string, string, error) {
+	model = strings.TrimSpace(model)
+	if model == "" {
+		return "", "", "", ErrSpeechProfileModelRequired
+	}
+	voiceID = strings.TrimSpace(voiceID)
+	if voiceID == "" {
+		return "", "", "", ErrSpeechProfileVoiceRequired
+	}
+	provider := ProviderName(strings.ToLower(strings.TrimSpace(providerCode)))
+	if provider != ProviderAliyun {
+		return "", "", "", fmt.Errorf("%w: TTS speech profile provider %q", ErrUnsupportedProvider, providerCode)
+	}
+	if !supportedTTSProfileModel(model) {
+		return "", "", "", fmt.Errorf("%w: TTS speech profile model %q", ErrUnsupportedModel, model)
+	}
+	return provider, model, voiceID, nil
 }
 
 func supportedASRProfileModel(model string) bool {

@@ -179,3 +179,12 @@ func TestBuildSpeechProfileAdaptersRejectUnconstructableProfiles(t *testing.T) {
 		})
 	}
 }
+
+func TestValidateTTSProfileDoesNotRequireDeploymentCredentials(t *testing.T) {
+	if err := ValidateTTSProfile("aliyun", "qwen3-tts-flash", "profile-voice"); err != nil {
+		t.Fatalf("ValidateTTSProfile() error = %v", err)
+	}
+	if _, err := BuildTTSProfileAdapter("aliyun", "qwen3-tts-flash", "profile-voice", TTSConfig{}); err == nil {
+		t.Fatal("BuildTTSProfileAdapter() error = nil, want deployment credential validation")
+	}
+}
