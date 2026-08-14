@@ -360,7 +360,7 @@ func TestManagerPlaysFallbackThroughActiveSession(t *testing.T) {
 		ASR:         asr.NewFakeProvider(asr.FakeProviderConfig{}),
 		Translation: &translate.FakeProvider{},
 		TTS: tts.NewFakeProvider(tts.FakeProviderConfig{
-		Chunks: []tts.AudioChunk{{SequenceNo: 1, Encoding: "pcm_s16le", SampleRate: 24000, Channels: 1, Data: []byte{1, 2}}},
+			Chunks: []tts.AudioChunk{{SequenceNo: 1, Encoding: "pcm_s16le", SampleRate: 24000, Channels: 1, Data: []byte{1, 2}}},
 			Result: tts.Result{Provider: "mock-tts", Model: "v1"},
 		}),
 	}, deps)
