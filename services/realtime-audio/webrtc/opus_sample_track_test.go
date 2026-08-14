@@ -3,13 +3,16 @@ package webrtc
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"math"
 	"math/rand"
 	"reflect"
 	"testing"
 	"time"
 
+	"github.com/1024XEngineer/xe6-tsy/services/realtime-audio/audio"
 	"github.com/1024XEngineer/xe6-tsy/services/realtime-audio/pipeline"
+	"github.com/1024XEngineer/xe6-tsy/services/realtime-audio/tts"
 	"github.com/pion/webrtc/v4/pkg/media"
 	opus "github.com/tphakala/go-opus/opus"
 )
@@ -28,12 +31,7 @@ func TestOpusSampleTrackEncodesPCMForWebRTC(t *testing.T) {
 		sample := int16(math.Sin(2*math.Pi*440*float64(index)/24_000) * 12_000)
 		binary.LittleEndian.PutUint16(pcm[index*2:], uint16(sample))
 	}
-	if err := track.Write(context.Background(), pipeline.AudioChunk{
-		SessionID:  "session-1",
-		PlaybackID: "playback-1",
-		SequenceNo: 1,
-		Data:       pcm,
-	}); err != nil {
+	if err := track.Write(context.Background(), canonicalOpusChunk(1, pcm)); err != nil {
 		t.Fatalf("Write() error = %v", err)
 	}
 	configureImmediateOpusPacing(track)
@@ -85,12 +83,7 @@ func TestOpusSampleTrackFlushesShortPCMOnlyOnComplete(t *testing.T) {
 	if err != nil {
 		t.Fatalf("newOpusSampleTrack() error = %v", err)
 	}
-	if err := track.Write(context.Background(), pipeline.AudioChunk{
-		SessionID:  "session-1",
-		PlaybackID: "playback-1",
-		SequenceNo: 1,
-		Data:       []byte{0, 1},
-	}); err != nil {
+	if err := track.Write(context.Background(), canonicalOpusChunk(1, []byte{0, 1})); err != nil {
 		t.Fatalf("Write(short PCM) error = %v", err)
 	}
 	if len(writer.samples) != 0 {
@@ -104,6 +97,45 @@ func TestOpusSampleTrackFlushesShortPCMOnlyOnComplete(t *testing.T) {
 	}
 }
 
+func TestOpusSampleTrackRejectsNonCanonicalPCM(t *testing.T) {
+	tests := []struct {
+		name  string
+		chunk pipeline.AudioChunk
+	}{
+		{
+			name:  "container",
+			chunk: pipeline.AudioChunk{SessionID: "session-1", PlaybackID: "playback-1", SequenceNo: 1, Encoding: "audio/wav", SampleRate: audio.TTSSampleRate, Channels: audio.MonoChannels, Data: []byte{1, 0}},
+		},
+		{
+			name:  "wrong sample rate",
+			chunk: pipeline.AudioChunk{SessionID: "session-1", PlaybackID: "playback-1", SequenceNo: 1, Encoding: audio.PCMEncoding, SampleRate: 16_000, Channels: audio.MonoChannels, Data: []byte{1, 0}},
+		},
+		{
+			name:  "stereo",
+			chunk: pipeline.AudioChunk{SessionID: "session-1", PlaybackID: "playback-1", SequenceNo: 1, Encoding: audio.PCMEncoding, SampleRate: audio.TTSSampleRate, Channels: 2, Data: []byte{1, 0, 2, 0}},
+		},
+		{
+			name:  "partial sample",
+			chunk: pipeline.AudioChunk{SessionID: "session-1", PlaybackID: "playback-1", SequenceNo: 1, Encoding: audio.PCMEncoding, SampleRate: audio.TTSSampleRate, Channels: audio.MonoChannels, Data: []byte{1}},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			writer := &sampleRecorder{}
+			track, err := newOpusSampleTrack(writer, MediaConfig{})
+			if err != nil {
+				t.Fatalf("newOpusSampleTrack() error = %v", err)
+			}
+			if err := track.Write(t.Context(), test.chunk); !errors.Is(err, tts.ErrAudioChunkInvalid) {
+				t.Fatalf("Write() error = %v, want %v", err, tts.ErrAudioChunkInvalid)
+			}
+			if len(writer.samples) != 0 {
+				t.Fatalf("encoded samples = %#v, want none", writer.samples)
+			}
+		})
+	}
+}
+
 func TestOpusSampleTrackCarriesPartialPCMAcrossProviderChunks(t *testing.T) {
 	writer := &sampleRecorder{}
 	track, err := newOpusSampleTrack(writer, MediaConfig{SampleRate: 24_000, Channels: 1})
@@ -114,17 +146,13 @@ func TestOpusSampleTrackCarriesPartialPCMAcrossProviderChunks(t *testing.T) {
 	configureImmediateOpusPacing(track)
 	first := make([]byte, 200*2)
 	second := make([]byte, 280*2)
-	if err := track.Write(context.Background(), pipeline.AudioChunk{
-		SessionID: "session-1", PlaybackID: "playback-1", SequenceNo: 1, Data: first,
-	}); err != nil {
+	if err := track.Write(context.Background(), canonicalOpusChunk(1, first)); err != nil {
 		t.Fatalf("Write(first partial chunk) error = %v", err)
 	}
 	if len(writer.samples) != 0 {
 		t.Fatalf("sample count after first partial chunk = %d, want 0", len(writer.samples))
 	}
-	if err := track.Write(context.Background(), pipeline.AudioChunk{
-		SessionID: "session-1", PlaybackID: "playback-1", SequenceNo: 2, Data: second,
-	}); err != nil {
+	if err := track.Write(context.Background(), canonicalOpusChunk(2, second)); err != nil {
 		t.Fatalf("Write(second partial chunk) error = %v", err)
 	}
 	if len(writer.samples) != 0 {
@@ -154,17 +182,13 @@ func TestOpusSampleTrackPrebuffersAndPacesFrames(t *testing.T) {
 	}
 
 	frame := make([]byte, 480*2)
-	if err := track.Write(context.Background(), pipeline.AudioChunk{
-		SessionID: "session-1", PlaybackID: "playback-1", SequenceNo: 1, Data: append([]byte(nil), frame...),
-	}); err != nil {
+	if err := track.Write(context.Background(), canonicalOpusChunk(1, append([]byte(nil), frame...))); err != nil {
 		t.Fatalf("Write(first frame) error = %v", err)
 	}
 	if len(writer.samples) != 0 {
 		t.Fatalf("sample count below startup buffer = %d, want 0", len(writer.samples))
 	}
-	if err := track.Write(context.Background(), pipeline.AudioChunk{
-		SessionID: "session-1", PlaybackID: "playback-1", SequenceNo: 2, Data: make([]byte, (opusPrebufferFrames-1)*len(frame)),
-	}); err != nil {
+	if err := track.Write(context.Background(), canonicalOpusChunk(2, make([]byte, (opusPrebufferFrames-1)*len(frame)))); err != nil {
 		t.Fatalf("Write(startup buffer) error = %v", err)
 	}
 	if len(writer.samples) != opusPrebufferFrames {
@@ -202,9 +226,7 @@ func TestOpusSampleTrackPreservesPCMWithRandomProviderBoundaries(t *testing.T) {
 		if end > len(pcm) {
 			end = len(pcm)
 		}
-		if err := track.Write(context.Background(), pipeline.AudioChunk{
-			SessionID: "session-1", PlaybackID: "playback-1", SequenceNo: sequence, Data: pcm[offset:end],
-		}); err != nil {
+		if err := track.Write(context.Background(), canonicalOpusChunk(sequence, pcm[offset:end])); err != nil {
 			t.Fatalf("Write(random chunk %d) error = %v", sequence, err)
 		}
 		offset = end
@@ -213,9 +235,11 @@ func TestOpusSampleTrackPreservesPCMWithRandomProviderBoundaries(t *testing.T) {
 		t.Fatalf("Complete() error = %v", err)
 	}
 
-	want := make([]int16, ((sampleCount+479)/480)*480)
+	want := make([]int16, ((sampleCount*2+959)/960)*960)
 	for index := 0; index < sampleCount; index++ {
-		want[index] = int16(binary.LittleEndian.Uint16(pcm[index*2:]))
+		sample := int16(binary.LittleEndian.Uint16(pcm[index*2:]))
+		want[index*2] = sample
+		want[index*2+1] = sample
 	}
 	if !reflect.DeepEqual(encoder.pcm, want) {
 		t.Fatal("encoded PCM differs after random provider chunking")
@@ -236,12 +260,7 @@ func TestOpusSampleTrackPreservesToneInsteadOfProducingNoise(t *testing.T) {
 		sample := int16(math.Sin(2*math.Pi*440*float64(index)/24_000) * 12_000)
 		binary.LittleEndian.PutUint16(pcm[index*2:], uint16(sample))
 	}
-	if err := track.Write(context.Background(), pipeline.AudioChunk{
-		SessionID:  "session-1",
-		PlaybackID: "playback-1",
-		SequenceNo: 1,
-		Data:       pcm,
-	}); err != nil {
+	if err := track.Write(context.Background(), canonicalOpusChunk(1, pcm)); err != nil {
 		t.Fatalf("Write(tone PCM) error = %v", err)
 	}
 	if len(writer.samples) != frameCount {
@@ -291,6 +310,14 @@ type sampleRecorder struct {
 
 type pcmRecordingEncoder struct {
 	pcm []int16
+}
+
+func canonicalOpusChunk(sequence int64, data []byte) pipeline.AudioChunk {
+	return pipeline.AudioChunk{
+		SessionID: "session-1", PlaybackID: "playback-1", SequenceNo: sequence,
+		Encoding: audio.PCMEncoding, SampleRate: audio.TTSSampleRate, Channels: audio.MonoChannels,
+		Data: data,
+	}
 }
 
 func (e *pcmRecordingEncoder) Encode(pcm []int16, packet []byte) (int, error) {

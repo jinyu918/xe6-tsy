@@ -99,6 +99,8 @@ describe("parseTTSAudioEvent", () => {
       playback_id: "playback_1",
       sample_rate_hz: 24000,
       channels: 1,
+      encoding: "pcm_s16le",
+      sequence: 1,
       pcm_base64: btoa(String.fromCharCode(...pcm)),
     });
     expect(event?.playbackId).toBe("playback_1");
@@ -114,6 +116,9 @@ describe("parseTTSAudioEvent", () => {
     const event = parseTTSAudioEvent({
       type: "tts.audio",
       sample_rate_hz: 24000,
+      channels: 1,
+      encoding: "pcm_s16le",
+      sequence: 1,
       pcm_base64: btoa("abcd"),
     });
     expect(event?.final).toBe(true);
@@ -123,12 +128,38 @@ describe("parseTTSAudioEvent", () => {
     const event = parseTTSAudioEvent({
       type: "tts.audio",
       sample_rate_hz: 24000,
+      channels: 1,
+      encoding: "pcm_s16le",
       sequence: 1,
       final: false,
       pcm_base64: btoa("abcd"),
     });
     expect(event?.final).toBe(false);
     expect(event?.sequence).toBe(1);
+  });
+
+  it("rejects noncanonical TTS payloads", () => {
+    const canonical = {
+      type: "tts.audio",
+      sample_rate_hz: 24000,
+      channels: 1,
+      encoding: "pcm_s16le",
+      sequence: 1,
+      pcm_base64: btoa(String.fromCharCode(0, 0)),
+    };
+    const cases = [
+      { name: "unknown encoding", payload: { encoding: "audio/wav" } },
+      { name: "container encoding", payload: { encoding: "audio_container" } },
+      { name: "wrong sample rate", payload: { sample_rate_hz: 16000 } },
+      { name: "stereo", payload: { channels: 2 } },
+      { name: "partial PCM sample", payload: { pcm_base64: btoa(String.fromCharCode(0)) } },
+      { name: "zero sequence", payload: { sequence: 0 } },
+      { name: "fractional sequence", payload: { sequence: 1.5 } },
+    ];
+
+    for (const testCase of cases) {
+      expect(parseTTSAudioEvent({ ...canonical, ...testCase.payload }), testCase.name).toBeNull();
+    }
   });
 
   it("notifies when a queued clip starts and ends", async () => {

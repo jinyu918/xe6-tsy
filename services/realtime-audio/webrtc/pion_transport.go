@@ -22,7 +22,7 @@ type PionTransport struct {
 	closeErr        error
 	audioSource     *PionAudioSource
 	wakeWords       *pionWakeWordSource
-	ttsTrack        *PionAudioTrack
+	ttsTrack        playback.AudioTrack
 	events          *PionEventSink
 	playback        *playback.Service
 	mediaConnection pionMediaPeerConnection
@@ -60,7 +60,7 @@ func (t *PionTransport) AudioSource() segment.FrameSource {
 }
 
 // TTSAudioTrack returns the outbound track writer, when media was enabled.
-func (t *PionTransport) TTSAudioTrack() *PionAudioTrack {
+func (t *PionTransport) TTSAudioTrack() playback.AudioTrack {
 	if t == nil {
 		return nil
 	}

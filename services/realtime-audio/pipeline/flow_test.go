@@ -24,7 +24,10 @@ func TestTurnProcessorRunsMockASRTranslationTTSFlow(t *testing.T) {
 	})
 	translator := &translate.FakeProvider{Result: translate.Result{Text: "hello", Provider: "mock-translate", Model: "v1", InputTokens: 2, OutputTokens: 1}}
 	ttsProvider := tts.NewFakeProvider(tts.FakeProviderConfig{
-		Chunks: []tts.AudioChunk{{SequenceNo: 1, Data: []byte{1}}, {SequenceNo: 2, Data: []byte{2}}},
+		Chunks: []tts.AudioChunk{
+			{SequenceNo: 1, Encoding: "pcm_s16le", SampleRate: 24000, Channels: 1, Data: []byte{1, 0}},
+			{SequenceNo: 2, Encoding: "pcm_s16le", SampleRate: 24000, Channels: 1, Data: []byte{2, 0}},
+		},
 		Result: tts.Result{Provider: "mock-tts", Model: "v1", AudioDuration: 250 * time.Millisecond},
 	})
 	finalSink := &recordingFinalSink{}

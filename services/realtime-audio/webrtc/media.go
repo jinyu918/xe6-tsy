@@ -7,11 +7,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/1024XEngineer/xe6-tsy/services/realtime-audio/audio"
-	"github.com/1024XEngineer/xe6-tsy/services/realtime-audio/pipeline"
 	"github.com/1024XEngineer/xe6-tsy/services/realtime-audio/playback"
 	"github.com/1024XEngineer/xe6-tsy/services/realtime-audio/segment"
 	"github.com/pion/opus"
@@ -20,9 +20,9 @@ import (
 )
 
 const (
-	defaultTTSSampleRate = 24_000
+	defaultTTSSampleRate = audio.TTSSampleRate
 	defaultASRSampleRate = audio.SupportedSampleRate
-	defaultMediaChannels = 1
+	defaultMediaChannels = audio.MonoChannels
 )
 
 var (
@@ -32,22 +32,22 @@ var (
 	ErrRemoteTrackAttached = errors.New("remote audio track is already attached")
 	ErrDecoderRequired     = errors.New("RTP audio decoder is required")
 	ErrPlaybackStopped     = errors.New("playback track is stopped")
-	ErrAudioChunkPending   = errors.New("audio chunk write is pending")
 )
 
-// MediaConfig defines the local TTS output format and advertised identifiers.
-// TTS chunks are signed 16-bit little-endian PCM at SampleRate and Channels.
-// Inbound Opus is decoded separately at the ASR pipeline's fixed sample rate.
+// MediaConfig defines canonical TTS input and outbound WebRTC media behavior.
+// TTS chunks are always pcm_s16le/24kHz/mono; an attached send track is always
+// encoded as Opus/48kHz/mono. Inbound Opus is decoded separately at the ASR
+// pipeline's fixed sample rate.
 type MediaConfig struct {
 	TTSTrackID       string
 	DataChannelLabel string
 	SampleRate       int
 	Channels         int
 	// SkipTTSTrack disables TTS track attachment and the matching remote-offer
-	// codec check. Browser clients (Chrome) cannot negotiate audio/L16.
+	// codec check. The PCM DataChannel mode uses this path.
 	SkipTTSTrack bool
-	// DownlinkCodec selects the TTS send codec when SkipTTSTrack is false.
-	// Empty / "L16" keeps the PCM L16 path; "opus" is the browser-safe path.
+	// DownlinkCodec is "opus" when a WebRTC TTS track is attached; "pcm" and
+	// "none" are accepted only with SkipTTSTrack for non-track output modes.
 	DownlinkCodec string
 }
 
@@ -64,7 +64,22 @@ func (c MediaConfig) normalized() (MediaConfig, error) {
 	if c.Channels == 0 {
 		c.Channels = defaultMediaChannels
 	}
-	if c.SampleRate <= 0 || c.Channels != 1 {
+	if c.SampleRate != audio.TTSSampleRate || c.Channels != audio.MonoChannels {
+		return MediaConfig{}, ErrMediaConfigInvalid
+	}
+	c.DownlinkCodec = strings.ToLower(strings.TrimSpace(c.DownlinkCodec))
+	if c.SkipTTSTrack {
+		switch c.DownlinkCodec {
+		case "", "none", "pcm":
+			return c, nil
+		default:
+			return MediaConfig{}, ErrMediaConfigInvalid
+		}
+	}
+	if c.DownlinkCodec == "" {
+		c.DownlinkCodec = "opus"
+	}
+	if c.DownlinkCodec != "opus" {
 		return MediaConfig{}, ErrMediaConfigInvalid
 	}
 	return c, nil
@@ -75,158 +90,9 @@ func (c MediaConfig) normalized() (MediaConfig, error) {
 type MediaTransport interface {
 	ConnectionTransport
 	AudioSource() segment.FrameSource
-	TTSAudioTrack() *PionAudioTrack
+	TTSAudioTrack() playback.AudioTrack
 	TranslationEvents() *PionEventSink
 	Playback() *playback.Service
-}
-
-// PionAudioTrack writes normalized PCM into a Pion sample track.
-type PionAudioTrack struct {
-	track      pionRTPTrack
-	sampleRate int
-	channels   int
-
-	mu        sync.Mutex
-	writeMu   sync.Mutex
-	stopped   map[string]bool
-	pending   map[audioChunkKey]pendingAudioChunk
-	sequence  uint16
-	timestamp uint32
-}
-
-type audioChunkKey struct {
-	playbackID string
-	sequenceNo int64
-}
-
-type pendingAudioChunk struct {
-	offset  int
-	dataLen int
-}
-
-type pionRTPTrack interface {
-	WriteRTP(*rtp.Packet) error
-}
-
-func newPionAudioTrack(track pionRTPTrack, config MediaConfig) (*PionAudioTrack, error) {
-	if track == nil {
-		return nil, ErrMediaUnavailable
-	}
-	config, err := config.normalized()
-	if err != nil {
-		return nil, err
-	}
-	return &PionAudioTrack{
-		track: track, sampleRate: config.SampleRate, channels: config.Channels,
-		stopped: make(map[string]bool), pending: make(map[audioChunkKey]pendingAudioChunk),
-	}, nil
-}
-
-// Write packetizes one PCM chunk into 20ms RTP L16 packets.
-func (t *PionAudioTrack) Write(ctx context.Context, chunk pipeline.AudioChunk) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	if t == nil || t.track == nil {
-		return ErrMediaUnavailable
-	}
-	if chunk.PlaybackID == "" || len(chunk.Data) == 0 {
-		return ErrInvalidDependency
-	}
-	if len(chunk.Data)%(2*t.channels) != 0 {
-		return ErrInvalidDependency
-	}
-	t.writeMu.Lock()
-	defer t.writeMu.Unlock()
-	key := audioChunkKey{playbackID: chunk.PlaybackID, sequenceNo: chunk.SequenceNo}
-	t.mu.Lock()
-	progress, hasPending := t.pending[key]
-	if !hasPending {
-		for pendingKey := range t.pending {
-			if pendingKey.playbackID == chunk.PlaybackID {
-				t.mu.Unlock()
-				return ErrAudioChunkPending
-			}
-		}
-	} else if progress.dataLen != len(chunk.Data) {
-		t.mu.Unlock()
-		return ErrInvalidDependency
-	}
-	offset := progress.offset
-	t.mu.Unlock()
-	bytesPerSample := 2 * t.channels
-	samplesPerPacket := t.sampleRate / 50
-	if samplesPerPacket < 1 {
-		samplesPerPacket = 1
-	}
-	for offset < len(chunk.Data) {
-		if err := ctx.Err(); err != nil {
-			if offset > 0 {
-				t.savePending(key, offset, len(chunk.Data))
-			}
-			return err
-		}
-		t.mu.Lock()
-		if t.stopped[chunk.PlaybackID] {
-			t.mu.Unlock()
-			return ErrPlaybackStopped
-		}
-		sequence := t.sequence + 1
-		timestamp := t.timestamp
-		t.mu.Unlock()
-
-		samples := (len(chunk.Data) - offset) / bytesPerSample
-		if samples > samplesPerPacket {
-			samples = samplesPerPacket
-		}
-		payload := make([]byte, samples*bytesPerSample)
-		for index := 0; index < len(payload); index += 2 {
-			payload[index] = chunk.Data[offset+index+1]
-			payload[index+1] = chunk.Data[offset+index]
-		}
-		packet := &rtp.Packet{Header: rtp.Header{Version: 2, SequenceNumber: sequence, Timestamp: timestamp}, Payload: payload}
-		if err := t.track.WriteRTP(packet); err != nil {
-			t.savePending(key, offset, len(chunk.Data))
-			return fmt.Errorf("write TTS sample: %w", err)
-		}
-		t.mu.Lock()
-		t.sequence = sequence
-		t.timestamp = timestamp + uint32(samples)
-		t.mu.Unlock()
-		offset += len(payload)
-	}
-	t.mu.Lock()
-	delete(t.pending, key)
-	t.mu.Unlock()
-	return nil
-}
-
-func (t *PionAudioTrack) savePending(key audioChunkKey, offset, dataLen int) {
-	t.mu.Lock()
-	t.pending[key] = pendingAudioChunk{offset: offset, dataLen: dataLen}
-	t.mu.Unlock()
-}
-
-// Publish adapts the track to pipeline.AudioChunkSink.
-func (t *PionAudioTrack) Publish(ctx context.Context, chunk pipeline.AudioChunk) error {
-	return t.Write(ctx, chunk)
-}
-
-// Stop prevents future chunks for a playback while leaving the PeerConnection and track open.
-func (t *PionAudioTrack) Stop(ctx context.Context, playbackID string) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	if t == nil || t.track == nil {
-		return ErrMediaUnavailable
-	}
-	if playbackID == "" {
-		return playback.ErrPlaybackRequired
-	}
-	t.mu.Lock()
-	t.stopped[playbackID] = true
-	t.mu.Unlock()
-	return nil
 }
 
 // PionEventSink serializes playback events to one translation-events DataChannel.
@@ -485,7 +351,6 @@ func (s *PionAudioSource) closeDone() {
 }
 
 var _ RTPDecoder = (*OpusDecoder)(nil)
-var _ pipeline.AudioChunkSink = (*PionAudioTrack)(nil)
 var _ playback.EventSink = (*PionEventSink)(nil)
 var _ interface {
 	ReadFrame(context.Context) (audio.Frame, error)

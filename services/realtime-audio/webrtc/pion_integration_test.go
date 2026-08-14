@@ -4,17 +4,21 @@ package webrtc
 
 import (
 	"context"
+	"encoding/binary"
 	"encoding/json"
+	"math"
 	"reflect"
 	"sync"
 	"testing"
 	"time"
 
 	realtimev1 "github.com/1024XEngineer/xe6-tsy/packages/contracts/realtime/v1"
+	"github.com/1024XEngineer/xe6-tsy/services/realtime-audio/audio"
 	"github.com/1024XEngineer/xe6-tsy/services/realtime-audio/pipeline"
 	"github.com/1024XEngineer/xe6-tsy/services/realtime-audio/playback"
 	"github.com/pion/rtp"
 	pion "github.com/pion/webrtc/v4"
+	opus "github.com/tphakala/go-opus/opus"
 )
 
 func TestPionTransportIntegrationSharesControlAndMediaOnOneConnection(t *testing.T) {
@@ -193,20 +197,22 @@ func TestPionTransportIntegrationSharesControlAndMediaOnOneConnection(t *testing
 
 	playCtx, cancelPlay := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancelPlay()
-	chunk := pipeline.AudioChunk{SessionID: "session-1", TurnID: "turn-1", PlaybackID: "playback-1", SequenceNo: 1, Data: []byte{1, 2, 3, 4}}
+	chunk := pipeline.AudioChunk{
+		SessionID: "session-1", TurnID: "turn-1", PlaybackID: "playback-1", SequenceNo: 1,
+		Encoding: audio.PCMEncoding, SampleRate: audio.TTSSampleRate, Channels: audio.MonoChannels,
+		Data: canonicalDownlinkTonePCM(480),
+	}
 	if err := mediaTransport.Playback().Publish(playCtx, chunk); err != nil {
 		t.Fatalf("publish downstream playback: %v", err)
 	}
-	select {
-	case packet := <-downstream:
-		if !reflect.DeepEqual(packet.Payload, []byte{2, 1, 4, 3}) {
-			t.Fatalf("downstream L16 payload = %#v", packet.Payload)
-		}
-	case <-playCtx.Done():
-		t.Fatal("timed out reading downstream TTS RTP")
-	}
 	if err := mediaTransport.Playback().Complete(playCtx, "session-1", "playback-1"); err != nil {
 		t.Fatalf("complete playback: %v", err)
+	}
+	select {
+	case packet := <-downstream:
+		assertPlayableDownlinkOpus(t, packet)
+	case <-playCtx.Done():
+		t.Fatal("timed out reading downstream TTS RTP")
 	}
 	for _, want := range []playback.EventType{playback.EventStarted, playback.EventFinished} {
 		select {
@@ -217,6 +223,53 @@ func TestPionTransportIntegrationSharesControlAndMediaOnOneConnection(t *testing
 		case <-playCtx.Done():
 			t.Fatalf("timed out reading %s event", want)
 		}
+	}
+}
+
+func canonicalDownlinkTonePCM(samples int) []byte {
+	pcm := make([]byte, samples*2)
+	for index := range samples {
+		sample := int16(math.Sin(2*math.Pi*440*float64(index)/audio.TTSSampleRate) * 12_000)
+		binary.LittleEndian.PutUint16(pcm[index*2:], uint16(sample))
+	}
+	return pcm
+}
+
+func assertPlayableDownlinkOpus(t *testing.T, packet *rtp.Packet) {
+	t.Helper()
+	if packet == nil || len(packet.Payload) == 0 {
+		t.Fatalf("downstream RTP packet = %#v", packet)
+	}
+	duration, err := opus.PacketDuration(packet.Payload)
+	if err != nil {
+		t.Fatalf("PacketDuration(downstream Opus) error = %v", err)
+	}
+	if duration != 960 {
+		t.Fatalf("downstream Opus duration = %d samples, want 960", duration)
+	}
+	decoder, err := opus.NewDecoder(audio.OpusSampleRate, audio.MonoChannels)
+	if err != nil {
+		t.Fatalf("create downstream Opus decoder: %v", err)
+	}
+	decoded := make([]int16, duration)
+	samples, err := decoder.Decode(packet.Payload, decoded)
+	if err != nil {
+		t.Fatalf("decode downstream Opus: %v", err)
+	}
+	if samples != duration {
+		t.Fatalf("decoded downstream samples = %d, want %d", samples, duration)
+	}
+	var peak int16
+	for _, sample := range decoded[:samples] {
+		if sample < 0 {
+			sample = -sample
+		}
+		if sample > peak {
+			peak = sample
+		}
+	}
+	if peak < 100 {
+		t.Fatalf("decoded downstream Opus peak = %d, want audible PCM", peak)
 	}
 }
 

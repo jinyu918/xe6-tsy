@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/1024XEngineer/xe6-tsy/services/realtime-audio/audio"
 	"github.com/1024XEngineer/xe6-tsy/services/realtime-audio/pipeline"
 	"github.com/pion/webrtc/v4/pkg/media"
 	opus "github.com/tphakala/go-opus/opus"
@@ -16,6 +17,7 @@ const (
 	opusFrameDuration   = 20 * time.Millisecond
 	opusPrebufferFrames = 6
 	opusMaxPacketSize   = 1275
+	opusSamplesPerFrame = audio.OpusSampleRate / 50
 )
 
 type opusSampleWriter interface {
@@ -37,11 +39,9 @@ func (e *goOpusEncoder) Encode(pcm []int16, packet []byte) (int, error) {
 	return e.encoder.Encode(pcm, packet)
 }
 
-// OpusSampleTrack encodes signed 16-bit PCM into browser-compatible Opus samples.
+// OpusSampleTrack converts canonical 24 kHz mono PCM to 48 kHz mono Opus samples.
 type OpusSampleTrack struct {
 	track           opusSampleWriter
-	sampleRate      int
-	channels        int
 	samplesPerFrame int
 	encoder         opusPCMEncoder
 
@@ -64,13 +64,12 @@ func newOpusSampleTrack(track opusSampleWriter, config MediaConfig) (*OpusSample
 	if err != nil {
 		return nil, err
 	}
-	samplesPerFrame := normalized.SampleRate / 50
-	if samplesPerFrame <= 0 {
+	if normalized.SampleRate != audio.TTSSampleRate || normalized.Channels != audio.MonoChannels {
 		return nil, ErrMediaConfigInvalid
 	}
 	encoder, err := opus.NewEncoder(opus.EncoderConfig{
-		SampleRate: normalized.SampleRate,
-		Channels:   normalized.Channels,
+		SampleRate: audio.OpusSampleRate,
+		Channels:   audio.MonoChannels,
 		Bitrate:    32_000,
 		Complexity: 10,
 	})
@@ -79,9 +78,7 @@ func newOpusSampleTrack(track opusSampleWriter, config MediaConfig) (*OpusSample
 	}
 	return &OpusSampleTrack{
 		track:           track,
-		sampleRate:      normalized.SampleRate,
-		channels:        normalized.Channels,
-		samplesPerFrame: samplesPerFrame,
+		samplesPerFrame: opusSamplesPerFrame,
 		encoder:         &goOpusEncoder{encoder: encoder},
 		stopped:         make(map[string]bool),
 		pending:         make(map[string][]byte),
@@ -103,16 +100,16 @@ func (t *OpusSampleTrack) Write(ctx context.Context, chunk pipeline.AudioChunk) 
 	if chunk.PlaybackID == "" || len(chunk.Data) == 0 {
 		return ErrInvalidDependency
 	}
-	if len(chunk.Data)%(2*t.channels) != 0 {
-		return ErrInvalidDependency
+	if err := chunk.ValidateCanonicalPCM(); err != nil {
+		return fmt.Errorf("validate canonical TTS PCM: %w", err)
 	}
 
 	t.writeMu.Lock()
 	defer t.writeMu.Unlock()
-	bytesPerFrame := t.samplesPerFrame * 2 * t.channels
+	bytesPerFrame := t.samplesPerFrame * 2
 	t.mu.Lock()
 	if chunk.SequenceNo != t.lastSequence[chunk.PlaybackID] {
-		t.pending[chunk.PlaybackID] = append(t.pending[chunk.PlaybackID], chunk.Data...)
+		t.pending[chunk.PlaybackID] = appendUpsampledTTS(t.pending[chunk.PlaybackID], chunk.Data)
 		t.lastSequence[chunk.PlaybackID] = chunk.SequenceNo
 	}
 	buffered := len(t.pending[chunk.PlaybackID])
@@ -127,11 +124,11 @@ func (t *OpusSampleTrack) Write(ctx context.Context, chunk pipeline.AudioChunk) 
 	return t.drainFrames(ctx, chunk.PlaybackID, false)
 }
 
-// drainFrames preserves provider PCM across arbitrary chunk boundaries. The
-// startup buffer absorbs provider delivery jitter; once started, deadlines
+// drainFrames preserves converted PCM across arbitrary provider chunk boundaries.
+// The startup buffer absorbs provider delivery jitter; once started, deadlines
 // keep RTP arrival aligned with the 20 ms timestamps written by Pion.
 func (t *OpusSampleTrack) drainFrames(ctx context.Context, playbackID string, flushTail bool) error {
-	bytesPerFrame := t.samplesPerFrame * 2 * t.channels
+	bytesPerFrame := t.samplesPerFrame * 2
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -179,7 +176,7 @@ func (t *OpusSampleTrack) writeFrame(ctx context.Context, playbackID string, fra
 	if t.isStopped(playbackID) {
 		return ErrPlaybackStopped
 	}
-	pcm := make([]int16, t.samplesPerFrame*t.channels)
+	pcm := make([]int16, t.samplesPerFrame)
 	for index := 0; index < len(frame)/2; index++ {
 		pcm[index] = int16(binary.LittleEndian.Uint16(frame[index*2:]))
 	}
@@ -199,6 +196,17 @@ func (t *OpusSampleTrack) writeFrame(ctx context.Context, playbackID string, fra
 	}
 	t.markFrameSent(playbackID)
 	return nil
+}
+
+// appendUpsampledTTS performs the fixed 2:1 expansion from the canonical TTS
+// rate to the Opus RTP clock rate. Duplicating complete PCM samples makes the
+// result independent of provider chunk boundaries.
+func appendUpsampledTTS(destination, source []byte) []byte {
+	for offset := 0; offset < len(source); offset += 2 {
+		destination = append(destination, source[offset], source[offset+1])
+		destination = append(destination, source[offset], source[offset+1])
+	}
+	return destination
 }
 
 func (t *OpusSampleTrack) paceFrame(ctx context.Context, playbackID string) error {

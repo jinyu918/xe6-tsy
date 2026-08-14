@@ -9,6 +9,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/1024XEngineer/xe6-tsy/services/realtime-audio/audio"
 )
 
 const defaultTranslationModel = "qwen3.6-flash"
@@ -109,7 +111,10 @@ func LoadProviderConfig(lookup LookupEnv) (ProviderConfig, error) {
 	if silenceDuration != 0 && (silenceDuration < 200*time.Millisecond || silenceDuration > 6000*time.Millisecond) {
 		return ProviderConfig{}, invalidValue("ASR_SILENCE_DURATION_MS", value(lookup, "ASR_SILENCE_DURATION_MS"))
 	}
-	if sampleRate != 0 && sampleRate != 8000 && sampleRate != 16000 {
+	if sampleRate == 0 {
+		sampleRate = audio.ASRSampleRate
+	}
+	if sampleRate != audio.ASRSampleRate {
 		return ProviderConfig{}, invalidValue("ASR_SAMPLE_RATE", value(lookup, "ASR_SAMPLE_RATE"))
 	}
 	translationModel, err := readTranslationModel(lookup)
@@ -127,6 +132,12 @@ func LoadProviderConfig(lookup LookupEnv) (ProviderConfig, error) {
 	ttsSampleRate, err := readInt(lookup, "TTS_SAMPLE_RATE")
 	if err != nil {
 		return ProviderConfig{}, err
+	}
+	if ttsSampleRate != 0 && ttsSampleRate != audio.TTSSampleRate {
+		return ProviderConfig{}, invalidValue("TTS_SAMPLE_RATE", value(lookup, "TTS_SAMPLE_RATE"))
+	}
+	if ttsSampleRate == 0 {
+		ttsSampleRate = audio.TTSSampleRate
 	}
 	ttsTimeout, err := readMilliseconds(lookup, "TTS_TIMEOUT_MS")
 	if err != nil {

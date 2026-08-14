@@ -11,6 +11,7 @@ import (
 	asrqwen "github.com/1024XEngineer/xe6-tsy/services/realtime-audio/asr/qwen"
 	"github.com/1024XEngineer/xe6-tsy/services/realtime-audio/assistant"
 	assistantqwen "github.com/1024XEngineer/xe6-tsy/services/realtime-audio/assistant/qwen"
+	"github.com/1024XEngineer/xe6-tsy/services/realtime-audio/audio"
 	"github.com/1024XEngineer/xe6-tsy/services/realtime-audio/translate"
 	translateqwen "github.com/1024XEngineer/xe6-tsy/services/realtime-audio/translate/qwen"
 	"github.com/1024XEngineer/xe6-tsy/services/realtime-audio/tts"
@@ -164,7 +165,7 @@ func buildASR(config ASRConfig, offline asr.Provider) (asr.Provider, error) {
 }
 
 func validateASRConfig(config ASRConfig) error {
-	if config.SampleRate != 0 && config.SampleRate != 8000 && config.SampleRate != 16000 {
+	if config.SampleRate != 0 && config.SampleRate != audio.ASRSampleRate {
 		return fmt.Errorf("%w: ASR_SAMPLE_RATE=%d", ErrInvalidEnvironmentValue, config.SampleRate)
 	}
 	if math.IsNaN(config.VADThreshold) || math.IsInf(config.VADThreshold, 0) || config.VADThreshold < -1 || config.VADThreshold > 1 {
@@ -208,6 +209,9 @@ func buildTTS(config TTSConfig, offline tts.Provider) (tts.Provider, error) {
 		}
 		return offline, nil
 	case ProviderAliyun:
+		if config.SampleRate != 0 && config.SampleRate != audio.TTSSampleRate {
+			return nil, fmt.Errorf("%w: TTS_SAMPLE_RATE=%d", ErrInvalidEnvironmentValue, config.SampleRate)
+		}
 		return ttsqwen.NewProvider(ttsqwen.Config{
 			APIKey: config.APIKey, BaseURL: config.BaseURL, Model: config.Model,
 			Provider: string(ProviderAliyun), Voice: config.Voice,

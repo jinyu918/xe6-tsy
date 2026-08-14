@@ -84,6 +84,26 @@ func TestBuildProvidersValidatesSelections(t *testing.T) {
 			offline: Providers{Translation: &translate.FakeProvider{}, TTS: tts.NewFakeProvider(tts.FakeProviderConfig{})},
 			want:    ErrInvalidEnvironmentValue,
 		},
+		{
+			name: "Qwen ASR 8kHz sample rate",
+			config: ProviderConfig{
+				ASR:         ASRConfig{Provider: ProviderAliyun, APIKey: "asr-key", BaseURL: "https://example.com", SampleRate: 8000},
+				Translation: TranslationConfig{Provider: ProviderMock},
+				TTS:         TTSConfig{Provider: ProviderMock},
+			},
+			offline: Providers{Translation: &translate.FakeProvider{}, TTS: tts.NewFakeProvider(tts.FakeProviderConfig{})},
+			want:    ErrInvalidEnvironmentValue,
+		},
+		{
+			name: "Qwen TTS sample rate",
+			config: ProviderConfig{
+				ASR:         ASRConfig{Provider: ProviderMock},
+				Translation: TranslationConfig{Provider: ProviderMock},
+				TTS:         TTSConfig{Provider: ProviderAliyun, APIKey: "tts-key", BaseURL: "https://example.com", SampleRate: 16000},
+			},
+			offline: Providers{ASR: asr.NewFakeProvider(asr.FakeProviderConfig{}), Translation: &translate.FakeProvider{}},
+			want:    ErrInvalidEnvironmentValue,
+		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

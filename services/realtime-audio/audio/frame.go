@@ -6,7 +6,7 @@ import (
 	"time"
 )
 
-const SupportedSampleRate = 16_000
+const SupportedSampleRate = ASRSampleRate
 
 var (
 	ErrPCMRequired           = errors.New("PCM audio is required")

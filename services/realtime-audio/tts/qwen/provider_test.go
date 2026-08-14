@@ -3,6 +3,7 @@ package qwen
 import (
 	"context"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -12,9 +13,25 @@ import (
 	"testing"
 	"time"
 
+	"github.com/1024XEngineer/xe6-tsy/services/realtime-audio/audio"
 	"github.com/1024XEngineer/xe6-tsy/services/realtime-audio/tts"
 	"github.com/gorilla/websocket"
 )
+
+func TestNewProviderRequiresCanonicalSampleRate(t *testing.T) {
+	_, err := NewProvider(Config{APIKey: "test-key", BaseURL: "https://example.com", SampleRate: 16_000})
+	if err == nil {
+		t.Fatal("NewProvider() error = nil, want error for noncanonical sample rate")
+	}
+
+	provider, err := NewProvider(Config{APIKey: "test-key", BaseURL: "https://example.com"})
+	if err != nil {
+		t.Fatalf("NewProvider() error = %v", err)
+	}
+	if provider.config.SampleRate != audio.TTSSampleRate {
+		t.Fatalf("SampleRate = %d, want %d", provider.config.SampleRate, audio.TTSSampleRate)
+	}
+}
 
 func TestProviderStreamsQwenRealtimeAudio(t *testing.T) {
 	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
@@ -74,7 +91,7 @@ func TestProviderStreamsQwenRealtimeAudio(t *testing.T) {
 	}))
 	defer server.Close()
 
-	provider, err := NewProvider(Config{APIKey: "test-key", BaseURL: "ws" + strings.TrimPrefix(server.URL, "http"), Model: "qwen3-tts-flash-realtime", SampleRate: 16000})
+	provider, err := NewProvider(Config{APIKey: "test-key", BaseURL: "ws" + strings.TrimPrefix(server.URL, "http"), Model: "qwen3-tts-flash-realtime", SampleRate: realtimeSampleRate})
 	if err != nil {
 		t.Fatalf("NewProvider() error = %v", err)
 	}
@@ -177,11 +194,339 @@ func TestProviderStreamsQwenTTSAudio(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Finish() error = %v", err)
 	}
-	if len(chunks) != 2 || chunks[0].SequenceNo != 1 || string(chunks[1].Data) != string([]byte{3, 4}) {
+	if len(chunks) != 1 || chunks[0].SequenceNo != 1 || string(chunks[0].Data) != string([]byte{1, 2, 3, 4}) {
 		t.Fatalf("chunks = %#v", chunks)
 	}
 	if result.Provider != "aliyun" || result.Model != "qwen3-tts-flash" {
 		t.Fatalf("result = %#v", result)
+	}
+}
+
+func TestProviderNormalizesWAVSSEAudio(t *testing.T) {
+	wav := makeWAV16(t, 8000, 2, []int16{1000, -1000, 3000, 1000})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: " + ttsEvent(wav) + "\n\n"))
+	}))
+	defer server.Close()
+
+	provider, err := NewProvider(Config{APIKey: "test-key", BaseURL: server.URL})
+	if err != nil {
+		t.Fatalf("NewProvider() error = %v", err)
+	}
+	stream, err := provider.StartStream(context.Background(), tts.Request{Text: "hello", TargetLanguage: "en-US"})
+	if err != nil {
+		t.Fatalf("StartStream() error = %v", err)
+	}
+	var chunks []tts.AudioChunk
+	for chunk := range stream.Chunks() {
+		chunks = append(chunks, chunk)
+	}
+	result, err := stream.Finish(context.Background())
+	if err != nil {
+		t.Fatalf("Finish() error = %v", err)
+	}
+	if len(chunks) != 1 || chunks[0].Encoding != audio.PCMEncoding || chunks[0].SampleRate != audio.TTSSampleRate || chunks[0].Channels != audio.MonoChannels {
+		t.Fatalf("chunks = %#v", chunks)
+	}
+	if err := chunks[0].ValidateCanonicalPCM(); err != nil {
+		t.Fatalf("normalized chunk is invalid: %v", err)
+	}
+	if len(chunks[0].Data) != 12 || result.AudioDuration <= 0 {
+		t.Fatalf("normalized data/result = %d/%#v", len(chunks[0].Data), result)
+	}
+}
+
+func TestProviderNormalizesWAVSSEAudioWhenFormatIsUndeclared(t *testing.T) {
+	wav := makeWAV16(t, 8000, 2, []int16{1000, -1000, 3000, 1000})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: " + ttsEvent(wav) + "\n\n"))
+	}))
+	defer server.Close()
+
+	provider, err := NewProvider(Config{APIKey: "test-key", BaseURL: server.URL})
+	if err != nil {
+		t.Fatalf("NewProvider() error = %v", err)
+	}
+	stream, err := provider.StartStream(context.Background(), tts.Request{Text: "hello", TargetLanguage: "en-US"})
+	if err != nil {
+		t.Fatalf("StartStream() error = %v", err)
+	}
+	var chunks []tts.AudioChunk
+	for chunk := range stream.Chunks() {
+		chunks = append(chunks, chunk)
+	}
+	if _, err := stream.Finish(context.Background()); err != nil {
+		t.Fatalf("Finish() error = %v", err)
+	}
+	if len(chunks) != 1 || len(chunks[0].Data) != 12 {
+		t.Fatalf("chunks = %#v", chunks)
+	}
+	if err := chunks[0].ValidateCanonicalPCM(); err != nil {
+		t.Fatalf("undeclared WAV chunk is invalid: %v", err)
+	}
+}
+
+func TestProviderNormalizesWAVAcrossUndeclaredSSEBoundaries(t *testing.T) {
+	wav := makeWAV16(t, 8000, 2, []int16{1000, -1000, 3000, 1000})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		for _, piece := range [][]byte{wav[:5], wav[5:11], wav[11:]} {
+			_, _ = w.Write([]byte("data: " + ttsEvent(piece) + "\n\n"))
+		}
+	}))
+	defer server.Close()
+
+	provider, err := NewProvider(Config{APIKey: "test-key", BaseURL: server.URL})
+	if err != nil {
+		t.Fatalf("NewProvider() error = %v", err)
+	}
+	stream, err := provider.StartStream(context.Background(), tts.Request{Text: "hello", TargetLanguage: "en-US"})
+	if err != nil {
+		t.Fatalf("StartStream() error = %v", err)
+	}
+	var chunks []tts.AudioChunk
+	for chunk := range stream.Chunks() {
+		chunks = append(chunks, chunk)
+	}
+	if _, err := stream.Finish(context.Background()); err != nil {
+		t.Fatalf("Finish() error = %v", err)
+	}
+	if len(chunks) != 1 || len(chunks[0].Data) != 12 {
+		t.Fatalf("chunks = %#v", chunks)
+	}
+	if err := chunks[0].ValidateCanonicalPCM(); err != nil {
+		t.Fatalf("split WAV chunk is invalid: %v", err)
+	}
+}
+
+func TestProviderUsesMetadataSentBeforeAudio(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: " + ttsEventWithMetadata(nil, map[string]any{"encoding": "pcm_s16le", "sample_rate": 16000, "channels": 2}) + "\n\n"))
+		_, _ = w.Write([]byte("data: " + ttsEvent([]byte{0xe8, 0x03, 0x18, 0xfc}) + "\n\n"))
+	}))
+	defer server.Close()
+
+	provider, err := NewProvider(Config{APIKey: "test-key", BaseURL: server.URL})
+	if err != nil {
+		t.Fatalf("NewProvider() error = %v", err)
+	}
+	stream, err := provider.StartStream(context.Background(), tts.Request{Text: "hello", TargetLanguage: "en-US"})
+	if err != nil {
+		t.Fatalf("StartStream() error = %v", err)
+	}
+	var chunks []tts.AudioChunk
+	for chunk := range stream.Chunks() {
+		chunks = append(chunks, chunk)
+	}
+	if _, err := stream.Finish(context.Background()); err != nil {
+		t.Fatalf("Finish() error = %v", err)
+	}
+	if len(chunks) != 1 || len(chunks[0].Data) == 0 {
+		t.Fatalf("chunks = %#v", chunks)
+	}
+	if err := chunks[0].ValidateCanonicalPCM(); err != nil {
+		t.Fatalf("metadata-first chunk is invalid: %v", err)
+	}
+}
+
+func TestProviderUsesMetadataSentAfterShortPayload(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: " + ttsEvent([]byte{0xe8, 0x03, 0x18, 0xfc}) + "\n\n"))
+		_, _ = w.Write([]byte("data: " + ttsEventWithMetadata(nil, map[string]any{"encoding": "pcm_s16le", "sample_rate": 16000, "channels": 2}) + "\n\n"))
+	}))
+	defer server.Close()
+
+	provider, err := NewProvider(Config{APIKey: "test-key", BaseURL: server.URL})
+	if err != nil {
+		t.Fatalf("NewProvider() error = %v", err)
+	}
+	stream, err := provider.StartStream(context.Background(), tts.Request{Text: "hello", TargetLanguage: "en-US"})
+	if err != nil {
+		t.Fatalf("StartStream() error = %v", err)
+	}
+	var chunks []tts.AudioChunk
+	for chunk := range stream.Chunks() {
+		chunks = append(chunks, chunk)
+	}
+	if _, err := stream.Finish(context.Background()); err != nil {
+		t.Fatalf("Finish() error = %v", err)
+	}
+	if len(chunks) != 1 || len(chunks[0].Data) != 4 {
+		t.Fatalf("chunks = %#v", chunks)
+	}
+	if err := chunks[0].ValidateCanonicalPCM(); err != nil {
+		t.Fatalf("metadata-after-payload chunk is invalid: %v", err)
+	}
+}
+
+func TestProviderNormalizesDeclaredStereoRawAcrossChunkBoundaries(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: " + ttsEventWithMetadata([]byte{0xe8}, map[string]any{"encoding": "pcm_s16le", "sample_rate": 16000, "channels": 2}) + "\n\n"))
+		_, _ = w.Write([]byte("data: " + ttsEventWithMetadata([]byte{0x03, 0x18, 0xfc}, nil) + "\n\n"))
+	}))
+	defer server.Close()
+
+	provider, err := NewProvider(Config{APIKey: "test-key", BaseURL: server.URL})
+	if err != nil {
+		t.Fatalf("NewProvider() error = %v", err)
+	}
+	stream, err := provider.StartStream(context.Background(), tts.Request{Text: "hello", TargetLanguage: "en-US"})
+	if err != nil {
+		t.Fatalf("StartStream() error = %v", err)
+	}
+	var data []byte
+	for chunk := range stream.Chunks() {
+		if err := chunk.ValidateCanonicalPCM(); err != nil {
+			t.Fatalf("chunk invalid: %v", err)
+		}
+		data = append(data, chunk.Data...)
+	}
+	if _, err := stream.Finish(context.Background()); err != nil {
+		t.Fatalf("Finish() error = %v", err)
+	}
+	if len(data) == 0 || len(data)%2 != 0 {
+		t.Fatalf("normalized data length = %d", len(data))
+	}
+}
+
+func TestProviderRejectsUnsupportedContainer(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: " + ttsEventWithMetadata([]byte{1, 2, 3, 4}, map[string]any{"encoding": "audio/mpeg"}) + "\n\n"))
+	}))
+	defer server.Close()
+
+	provider, err := NewProvider(Config{APIKey: "test-key", BaseURL: server.URL})
+	if err != nil {
+		t.Fatalf("NewProvider() error = %v", err)
+	}
+	stream, err := provider.StartStream(context.Background(), tts.Request{Text: "hello", TargetLanguage: "en-US"})
+	if err != nil {
+		t.Fatalf("StartStream() error = %v", err)
+	}
+	for range stream.Chunks() {
+	}
+	if _, err := stream.Finish(context.Background()); !errors.Is(err, audio.ErrAudioEncoding) {
+		t.Fatalf("Finish() error = %v, want audio.ErrAudioEncoding", err)
+	}
+}
+
+func TestProviderRejectsNativeOpusAtAdapterBoundary(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: " + ttsEventWithMetadata([]byte{1, 2, 3, 4}, map[string]any{"encoding": "audio/opus"}) + "\n\n"))
+	}))
+	defer server.Close()
+
+	provider, err := NewProvider(Config{APIKey: "test-key", BaseURL: server.URL})
+	if err != nil {
+		t.Fatalf("NewProvider() error = %v", err)
+	}
+	stream, err := provider.StartStream(context.Background(), tts.Request{Text: "hello", TargetLanguage: "en-US"})
+	if err != nil {
+		t.Fatalf("StartStream() error = %v", err)
+	}
+	for range stream.Chunks() {
+	}
+	if _, err := stream.Finish(context.Background()); !errors.Is(err, audio.ErrAudioEncoding) {
+		t.Fatalf("Finish() error = %v, want audio.ErrAudioEncoding", err)
+	}
+}
+
+func TestProviderNormalizesURLAudioFromContentType(t *testing.T) {
+	wav := makeWAV16(t, 16000, 1, []int16{1000, -1000})
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/audio" {
+			w.Header().Set("Content-Type", "audio/wav")
+			_, _ = w.Write(wav)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: " + ttsEventURL(server.URL+"/audio") + "\n\n"))
+	}))
+	defer server.Close()
+
+	provider, err := NewProvider(Config{APIKey: "test-key", BaseURL: server.URL, AudioURLAllowlist: []string{"127.0.0.1"}})
+	if err != nil {
+		t.Fatalf("NewProvider() error = %v", err)
+	}
+	stream, err := provider.StartStream(context.Background(), tts.Request{Text: "hello", TargetLanguage: "en-US"})
+	if err != nil {
+		t.Fatalf("StartStream() error = %v", err)
+	}
+	for chunk := range stream.Chunks() {
+		if err := chunk.ValidateCanonicalPCM(); err != nil {
+			t.Fatalf("URL chunk invalid: %v", err)
+		}
+	}
+	if _, err := stream.Finish(context.Background()); err != nil {
+		t.Fatalf("Finish() error = %v", err)
+	}
+}
+
+func TestProviderNormalizesURLRawPCMFromContentTypeParameters(t *testing.T) {
+	raw := []byte{0xe8, 0x03, 0x18, 0xfc}
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/audio" {
+			w.Header().Set("Content-Type", "audio/pcm; rate=16000; channels=2")
+			_, _ = w.Write(raw)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: " + ttsEventURL(server.URL+"/audio") + "\n\n"))
+	}))
+	defer server.Close()
+
+	provider, err := NewProvider(Config{APIKey: "test-key", BaseURL: server.URL, AudioURLAllowlist: []string{"127.0.0.1"}})
+	if err != nil {
+		t.Fatalf("NewProvider() error = %v", err)
+	}
+	stream, err := provider.StartStream(context.Background(), tts.Request{Text: "hello", TargetLanguage: "en-US"})
+	if err != nil {
+		t.Fatalf("StartStream() error = %v", err)
+	}
+	var chunks []tts.AudioChunk
+	for chunk := range stream.Chunks() {
+		chunks = append(chunks, chunk)
+	}
+	if _, err := stream.Finish(context.Background()); err != nil {
+		t.Fatalf("Finish() error = %v", err)
+	}
+	if len(chunks) != 1 || len(chunks[0].Data) == 0 {
+		t.Fatalf("chunks = %#v", chunks)
+	}
+	if err := chunks[0].ValidateCanonicalPCM(); err != nil {
+		t.Fatalf("URL PCM chunk is invalid: %v", err)
+	}
+}
+
+func TestProviderRejectsChangingMetadataAfterCanonicalStreamingStarts(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: " + ttsEvent(make([]byte, 12)) + "\n\n"))
+		_, _ = w.Write([]byte("data: " + ttsEventWithMetadata([]byte{3, 4}, map[string]any{"sample_rate": 16000}) + "\n\n"))
+	}))
+	defer server.Close()
+
+	provider, err := NewProvider(Config{APIKey: "test-key", BaseURL: server.URL})
+	if err != nil {
+		t.Fatalf("NewProvider() error = %v", err)
+	}
+	stream, err := provider.StartStream(context.Background(), tts.Request{Text: "hello", TargetLanguage: "en-US"})
+	if err != nil {
+		t.Fatalf("StartStream() error = %v", err)
+	}
+	for range stream.Chunks() {
+	}
+	if _, err := stream.Finish(context.Background()); !errors.Is(err, audio.ErrAudioFormat) {
+		t.Fatalf("Finish() error = %v, want audio.ErrAudioFormat", err)
 	}
 }
 
@@ -246,7 +591,7 @@ func TestFinishPrefersCompletedResultOverCanceledContext(t *testing.T) {
 func TestFinishCancellationDoesNotCloseChunksWhileWorkerSends(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
-		for index := 0; index < 32; index++ {
+		for index := 0; index < 64; index++ {
 			_, _ = w.Write([]byte("data: " + ttsEvent([]byte{byte(index)}) + "\n\n"))
 		}
 	}))
@@ -311,15 +656,54 @@ func TestDownloadAudioRequiresAllowlistedHost(t *testing.T) {
 }
 
 func ttsEvent(audio []byte) string {
+	return ttsEventWithMetadata(audio, nil)
+}
+
+func ttsEventWithMetadata(audio []byte, metadata map[string]any) string {
 	data, _ := json.Marshal(generationResponse{Output: struct {
-		Audio struct {
-			Data string `json:"data"`
-			URL  string `json:"url"`
-		} `json:"audio"`
+		Audio generationAudio `json:"audio"`
 	}{}})
 	var event map[string]any
 	_ = json.Unmarshal(data, &event)
-	event["output"] = map[string]any{"audio": map[string]any{"data": base64.StdEncoding.EncodeToString(audio)}}
+	audioValue := map[string]any{"data": base64.StdEncoding.EncodeToString(audio)}
+	for key, value := range metadata {
+		audioValue[key] = value
+	}
+	event["output"] = map[string]any{"audio": audioValue}
 	data, _ = json.Marshal(event)
 	return string(data)
+}
+
+func ttsEventURL(rawURL string) string {
+	data, _ := json.Marshal(generationResponse{Output: struct {
+		Audio generationAudio `json:"audio"`
+	}{}})
+	var event map[string]any
+	_ = json.Unmarshal(data, &event)
+	event["output"] = map[string]any{"audio": map[string]any{"url": rawURL}}
+	data, _ = json.Marshal(event)
+	return string(data)
+}
+
+func makeWAV16(t *testing.T, sampleRate, channels int, samples []int16) []byte {
+	t.Helper()
+	data := make([]byte, len(samples)*2)
+	for index, sample := range samples {
+		binary.LittleEndian.PutUint16(data[index*2:], uint16(sample))
+	}
+	result := make([]byte, 44+len(data))
+	copy(result, []byte("RIFF"))
+	binary.LittleEndian.PutUint32(result[4:], uint32(len(result)-8))
+	copy(result[8:], []byte("WAVEfmt "))
+	binary.LittleEndian.PutUint32(result[16:], 16)
+	binary.LittleEndian.PutUint16(result[20:], 1)
+	binary.LittleEndian.PutUint16(result[22:], uint16(channels))
+	binary.LittleEndian.PutUint32(result[24:], uint32(sampleRate))
+	binary.LittleEndian.PutUint32(result[28:], uint32(sampleRate*channels*2))
+	binary.LittleEndian.PutUint16(result[32:], uint16(channels*2))
+	binary.LittleEndian.PutUint16(result[34:], 16)
+	copy(result[36:], []byte("data"))
+	binary.LittleEndian.PutUint32(result[40:], uint32(len(data)))
+	copy(result[44:], data)
+	return result
 }

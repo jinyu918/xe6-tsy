@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/1024XEngineer/xe6-tsy/services/realtime-audio/asr"
+	"github.com/1024XEngineer/xe6-tsy/services/realtime-audio/audio"
 	"github.com/gorilla/websocket"
 )
 
@@ -54,7 +55,7 @@ func TestProviderMapsRealtimeEvents(t *testing.T) {
 			assertUniqueEventID(t, event, seenEventIDs)
 			encodedAudio, _ := event["audio"].(string)
 			decoded, decodeErr := base64.StdEncoding.DecodeString(encodedAudio)
-			if decodeErr != nil || string(decoded) != "pcm" {
+			if decodeErr != nil || string(decoded) != string([]byte{1, 0}) {
 				t.Errorf("audio payload = %q, err=%v", decoded, decodeErr)
 			}
 		}
@@ -83,7 +84,7 @@ func TestProviderMapsRealtimeEvents(t *testing.T) {
 	if err != nil {
 		t.Fatalf("StartStream() error = %v", err)
 	}
-	if err := stream.PushAudio(context.Background(), []byte("pcm")); err != nil {
+	if err := stream.PushAudio(context.Background(), []byte{1, 0}); err != nil {
 		t.Fatalf("PushAudio() error = %v", err)
 	}
 	result, err := stream.Finish(context.Background())
@@ -482,7 +483,7 @@ func TestManualModeFinishSendsCommitBeforeSessionFinish(t *testing.T) {
 	if err != nil {
 		t.Fatalf("StartStream() error = %v", err)
 	}
-	if err := stream.PushAudio(context.Background(), []byte("pcm")); err != nil {
+	if err := stream.PushAudio(context.Background(), []byte{1, 0}); err != nil {
 		t.Fatalf("PushAudio() error = %v", err)
 	}
 	result, err := stream.Finish(context.Background())
@@ -517,6 +518,7 @@ func TestNewProviderValidatesConfiguration(t *testing.T) {
 	}{
 		{name: "missing api key", config: Config{WebSocketURL: "wss://example.com"}, wantErr: ErrAPIKeyRequired},
 		{name: "missing endpoint", config: Config{APIKey: "test-key"}, wantErr: ErrEndpointRequired},
+		{name: "8kHz input", config: Config{APIKey: "test-key", WebSocketURL: "wss://example.com", SampleRate: 8000}, wantErr: ErrSampleRate},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -707,6 +709,37 @@ func TestPushAudioIgnoresEmptyChunk(t *testing.T) {
 	stream := &stream{}
 	if err := stream.PushAudio(context.Background(), nil); err != nil {
 		t.Fatalf("PushAudio() error = %v", err)
+	}
+}
+
+func TestPushAudioRejectsUnalignedPCM(t *testing.T) {
+	stream := &stream{sampleRate: 16000}
+	if err := stream.PushAudio(context.Background(), []byte{1}); !errors.Is(err, audio.ErrPCMAlignment) {
+		t.Fatalf("PushAudio() error = %v, want PCM alignment error", err)
+	}
+}
+
+func TestHandleEventEmitsOnlyFirstFinal(t *testing.T) {
+	stream := &stream{provider: "aliyun", model: "model_01", events: make(chan asr.Event, 2)}
+	for _, transcript := range []string{"first", "second"} {
+		data := mustJSON(t, map[string]any{
+			"type": "conversation.item.input_audio_transcription.completed", "transcript": transcript,
+		})
+		if err := stream.handleEvent(data); err != nil {
+			t.Fatalf("handleEvent(%q) error = %v", transcript, err)
+		}
+	}
+	result, err := stream.finalResult()
+	if err != nil || result.Text != "first" {
+		t.Fatalf("finalResult() = %#v, %v; want first final", result, err)
+	}
+	if event := <-stream.events; event.Final == nil || event.Final.Text != "first" {
+		t.Fatalf("event = %#v, want first final", event)
+	}
+	select {
+	case event := <-stream.events:
+		t.Fatalf("unexpected duplicate final event: %#v", event)
+	default:
 	}
 }
 

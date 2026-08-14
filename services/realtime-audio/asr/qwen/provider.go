@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/1024XEngineer/xe6-tsy/services/realtime-audio/asr"
+	"github.com/1024XEngineer/xe6-tsy/services/realtime-audio/audio"
 	"github.com/gorilla/websocket"
 )
 
@@ -27,6 +28,7 @@ var (
 	ErrAPIKeyRequired   = errors.New("Qwen ASR API key is required")
 	ErrEndpointRequired = errors.New("Qwen ASR WebSocket endpoint is required")
 	ErrModelRequired    = errors.New("Qwen ASR model is required")
+	ErrSampleRate       = errors.New("Qwen ASR requires 16kHz PCM input")
 )
 
 // Config contains only provider-specific transport and session settings.
@@ -64,9 +66,10 @@ func NewProvider(config Config) (*Provider, error) {
 	if config.Model == "" {
 		config.Model = defaultModel
 	}
-	if config.SampleRate <= 0 {
-		config.SampleRate = 16000
+	if config.SampleRate != 0 && config.SampleRate != audio.ASRSampleRate {
+		return nil, fmt.Errorf("%w: %dHz", ErrSampleRate, config.SampleRate)
 	}
+	config.SampleRate = audio.ASRSampleRate
 	if config.SilenceDuration <= 0 {
 		config.SilenceDuration = 500 * time.Millisecond
 	}
@@ -193,6 +196,7 @@ type stream struct {
 	stateMu sync.Mutex
 	result  asr.FinalResult
 	err     error
+	final   bool
 	started int64
 	ended   int64
 	finish  sync.Once
@@ -207,13 +211,16 @@ type websocketConn interface {
 	SetWriteDeadline(deadline time.Time) error
 }
 
-func (s *stream) PushAudio(ctx context.Context, audio []byte) error {
-	if len(audio) == 0 {
+func (s *stream) PushAudio(ctx context.Context, pcm []byte) error {
+	if len(pcm) == 0 {
 		return nil
+	}
+	if err := audio.ValidatePCM(pcm, s.sampleRate, audio.MonoChannels); err != nil {
+		return fmt.Errorf("validate Qwen ASR PCM: %w", err)
 	}
 	return s.write(ctx, map[string]any{
 		"type":  "input_audio_buffer.append",
-		"audio": base64.StdEncoding.EncodeToString(audio),
+		"audio": base64.StdEncoding.EncodeToString(pcm),
 	})
 }
 
@@ -381,9 +388,9 @@ func (s *stream) handleEvent(data []byte) error {
 		if result.AudioEnd > result.AudioStart {
 			result.AudioDuration = result.AudioEnd - result.AudioStart
 		}
-		s.stateMu.Lock()
-		s.result = result
-		s.stateMu.Unlock()
+		if !s.setFinalResult(result) {
+			return nil
+		}
 		if err := s.emitEvent(asr.Event{Type: asr.EventFinal, Text: result.Text, Final: &result}); err != nil {
 			return err
 		}
@@ -391,6 +398,17 @@ func (s *stream) handleEvent(data []byte) error {
 		return fmt.Errorf("Qwen ASR event failed: %s", event.Error.Message)
 	}
 	return nil
+}
+
+func (s *stream) setFinalResult(result asr.FinalResult) bool {
+	s.stateMu.Lock()
+	defer s.stateMu.Unlock()
+	if s.final {
+		return false
+	}
+	s.final = true
+	s.result = result
+	return true
 }
 
 // emitEvent keeps protocol reads independent from a slow Events consumer. Partial

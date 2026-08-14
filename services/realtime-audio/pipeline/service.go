@@ -31,7 +31,20 @@ type AudioChunk struct {
 	PlaybackID string
 	SequenceNo int64
 	Encoding   string
+	SampleRate int
+	Channels   int
 	Data       []byte
+}
+
+// ValidateCanonicalPCM verifies that a playback chunk still satisfies the
+// provider-to-pipeline TTS media contract at a downstream boundary.
+func (c AudioChunk) ValidateCanonicalPCM() error {
+	return (tts.AudioChunk{
+		Encoding:   c.Encoding,
+		SampleRate: c.SampleRate,
+		Channels:   c.Channels,
+		Data:       c.Data,
+	}).ValidateCanonicalPCM()
 }
 
 // AudioChunkSink accepts synthesized chunks for downstream playback.

@@ -11,162 +11,10 @@ import (
 	"time"
 
 	"github.com/1024XEngineer/xe6-tsy/services/realtime-audio/audio"
-	"github.com/1024XEngineer/xe6-tsy/services/realtime-audio/pipeline"
 	"github.com/1024XEngineer/xe6-tsy/services/realtime-audio/playback"
 	"github.com/pion/rtp"
 	pion "github.com/pion/webrtc/v4"
 )
-
-func TestPionAudioTrackCopiesPCMAndStopsOnlyOnePlayback(t *testing.T) {
-	fake := &rtpTrackRecorder{}
-	track, err := newPionAudioTrack(fake, MediaConfig{SampleRate: 16_000, Channels: 1})
-	if err != nil {
-		t.Fatalf("newPionAudioTrack() error = %v", err)
-	}
-	data := []byte{1, 2, 3, 4}
-	chunk := pipeline.AudioChunk{SessionID: "session-1", PlaybackID: "playback-1", SequenceNo: 1, Data: data}
-	if err := track.Write(context.Background(), chunk); err != nil {
-		t.Fatalf("Write() error = %v", err)
-	}
-	data[0] = 9
-	if err := track.Stop(context.Background(), "playback-1"); err != nil {
-		t.Fatalf("Stop() error = %v", err)
-	}
-	if err := track.Write(context.Background(), pipeline.AudioChunk{SessionID: "session-1", PlaybackID: "playback-1", SequenceNo: 2, Data: []byte{5, 6}}); !errors.Is(err, ErrPlaybackStopped) {
-		t.Fatalf("Write(stopped) error = %v", err)
-	}
-	if err := track.Write(context.Background(), pipeline.AudioChunk{SessionID: "session-1", PlaybackID: "playback-2", SequenceNo: 1, Data: []byte{7, 8}}); err != nil {
-		t.Fatalf("Write(next playback) error = %v", err)
-	}
-	got := fake.Packets()
-	if len(got) != 2 || !reflect.DeepEqual(got[0].Payload, []byte{2, 1, 4, 3}) || got[0].SequenceNumber != 1 || got[1].Timestamp != 2 {
-		t.Fatalf("packets = %#v", got)
-	}
-}
-
-func TestPionAudioTrackPacketizesPCMIntoTwentyMillisecondRTP(t *testing.T) {
-	fake := &rtpTrackRecorder{}
-	track, err := newPionAudioTrack(fake, MediaConfig{SampleRate: 16_000, Channels: 1})
-	if err != nil {
-		t.Fatalf("newPionAudioTrack() error = %v", err)
-	}
-	pcm := make([]byte, (320+160)*2)
-	for index := range pcm {
-		pcm[index] = byte(index)
-	}
-	if err := track.Write(context.Background(), pipeline.AudioChunk{SessionID: "session-1", PlaybackID: "playback-1", SequenceNo: 1, Data: pcm}); err != nil {
-		t.Fatalf("Write() error = %v", err)
-	}
-	packets := fake.Packets()
-	if len(packets) != 2 {
-		t.Fatalf("RTP packet count = %d, want 2", len(packets))
-	}
-	if len(packets[0].Payload) != 320*2 || len(packets[1].Payload) != 160*2 {
-		t.Fatalf("RTP payload lengths = %d, %d; want 640, 320", len(packets[0].Payload), len(packets[1].Payload))
-	}
-	if packets[0].SequenceNumber != 1 || packets[1].SequenceNumber != 2 {
-		t.Fatalf("RTP sequence numbers = %d, %d; want 1, 2", packets[0].SequenceNumber, packets[1].SequenceNumber)
-	}
-	if packets[0].Timestamp != 0 || packets[1].Timestamp != 320 {
-		t.Fatalf("RTP timestamps = %d, %d; want 0, 320", packets[0].Timestamp, packets[1].Timestamp)
-	}
-}
-
-func TestPionAudioTrackPacketizesTwentyMillisecondsAtTwentyFourKilohertz(t *testing.T) {
-	fake := &rtpTrackRecorder{}
-	track, err := newPionAudioTrack(fake, MediaConfig{SampleRate: 24_000, Channels: 1})
-	if err != nil {
-		t.Fatalf("newPionAudioTrack() error = %v", err)
-	}
-	pcm := make([]byte, (480+1)*2)
-	if err := track.Write(context.Background(), pipeline.AudioChunk{SessionID: "session-1", PlaybackID: "playback-1", SequenceNo: 1, Data: pcm}); err != nil {
-		t.Fatalf("Write() error = %v", err)
-	}
-	packets := fake.Packets()
-	if len(packets) != 2 || len(packets[0].Payload) != 480*2 || len(packets[1].Payload) != 2 || packets[1].Timestamp != 480 {
-		t.Fatalf("24kHz packets = %#v, want 960-byte full packet and 2-byte tail at timestamp 480", packets)
-	}
-}
-
-func TestPionAudioTrackReturnsRTPWriteError(t *testing.T) {
-	expected := errors.New("RTP write failed")
-	track, err := newPionAudioTrack(&failingRTPTrackRecorder{err: expected}, MediaConfig{SampleRate: 16_000, Channels: 1})
-	if err != nil {
-		t.Fatalf("newPionAudioTrack() error = %v", err)
-	}
-	err = track.Write(context.Background(), pipeline.AudioChunk{SessionID: "session-1", PlaybackID: "playback-1", SequenceNo: 1, Data: make([]byte, 640)})
-	if !errors.Is(err, expected) {
-		t.Fatalf("Write() error = %v, want wrapped RTP error", err)
-	}
-}
-
-func TestPionAudioTrackRetriesOnlyUnsentPacketsAfterPartialFailure(t *testing.T) {
-	expected := errors.New("second RTP write failed")
-	recorder := &partialFailureRTPTrackRecorder{failAt: 2, err: expected}
-	track, err := newPionAudioTrack(recorder, MediaConfig{SampleRate: 16_000, Channels: 1})
-	if err != nil {
-		t.Fatalf("newPionAudioTrack() error = %v", err)
-	}
-	pcm := make([]byte, (320+160)*2)
-	for index := range pcm {
-		pcm[index] = byte(index)
-	}
-	chunk := pipeline.AudioChunk{SessionID: "session-1", PlaybackID: "playback-1", SequenceNo: 1, Data: pcm}
-	if err := track.Write(context.Background(), chunk); !errors.Is(err, expected) {
-		t.Fatalf("first Write() error = %v, want %v", err, expected)
-	}
-	if got := len(recorder.Packets()); got != 1 {
-		t.Fatalf("successful packets after partial failure = %d, want 1", got)
-	}
-	if err := track.Write(context.Background(), chunk); err != nil {
-		t.Fatalf("retry Write() error = %v", err)
-	}
-	packets := recorder.Packets()
-	if len(packets) != 2 {
-		t.Fatalf("successful packets after retry = %d, want 2", len(packets))
-	}
-	if packets[0].SequenceNumber != 1 || packets[1].SequenceNumber != 2 {
-		t.Fatalf("packet sequence numbers = %d, %d; want 1, 2", packets[0].SequenceNumber, packets[1].SequenceNumber)
-	}
-	wantPayload := make([]byte, len(pcm[320*2:]))
-	for index := 0; index < len(wantPayload); index += 2 {
-		wantPayload[index] = pcm[320*2+index+1]
-		wantPayload[index+1] = pcm[320*2+index]
-	}
-	if !reflect.DeepEqual(packets[1].Payload, wantPayload) {
-		t.Fatalf("retry payload = %v, want unsent PCM tail", packets[1].Payload)
-	}
-}
-
-func TestPionAudioTrackStopDoesNotWaitForRTPWrite(t *testing.T) {
-	recorder := &blockingRTPTrackRecorder{started: make(chan struct{}), release: make(chan struct{})}
-	track, err := newPionAudioTrack(recorder, MediaConfig{SampleRate: 16_000, Channels: 1})
-	if err != nil {
-		t.Fatalf("newPionAudioTrack() error = %v", err)
-	}
-	chunk := pipeline.AudioChunk{SessionID: "session-1", PlaybackID: "playback-1", SequenceNo: 1, Data: []byte{1, 2}}
-	writeDone := make(chan error, 1)
-	go func() { writeDone <- track.Write(context.Background(), chunk) }()
-	select {
-	case <-recorder.started:
-	case <-time.After(time.Second):
-		t.Fatal("Write() did not reach RTP track")
-	}
-	stopDone := make(chan error, 1)
-	go func() { stopDone <- track.Stop(context.Background(), "playback-1") }()
-	select {
-	case err := <-stopDone:
-		if err != nil {
-			t.Fatalf("Stop() error = %v", err)
-		}
-	case <-time.After(100 * time.Millisecond):
-		t.Fatal("Stop() waited for blocked RTP write")
-	}
-	close(recorder.release)
-	if err := <-writeDone; err != nil {
-		t.Fatalf("Write() error = %v", err)
-	}
-}
 
 func TestPionEventSinkWaitsForOpenAndSendsJSON(t *testing.T) {
 	channel := &dataChannelRecorder{state: pion.DataChannelStateConnecting}
@@ -332,7 +180,7 @@ func TestPionFactoryConfiguresMediaWhenPeerSupportsIt(t *testing.T) {
 	if !ok || mediaTransport.AudioSource() == nil || mediaTransport.TranslationEvents() == nil {
 		t.Fatalf("media transport = %#v", transport)
 	}
-	if _, err := transport.Answer(context.Background(), SessionDescription{Type: "offer", SDP: l16OfferSDP(24_000)}); err != nil {
+	if _, err := transport.Answer(context.Background(), SessionDescription{Type: "offer", SDP: opusOfferSDP()}); err != nil {
 		t.Fatalf("Answer() error = %v", err)
 	}
 	if mediaTransport.TTSAudioTrack() == nil || mediaTransport.Playback() == nil {
@@ -359,7 +207,7 @@ func TestPionTransportAnswerConfiguresTTSTrackOnceConcurrently(t *testing.T) {
 
 	answers := make(chan error, 2)
 	answer := func() {
-		_, answerErr := transport.Answer(context.Background(), SessionDescription{Type: "offer", SDP: l16OfferSDP(24_000)})
+		_, answerErr := transport.Answer(context.Background(), SessionDescription{Type: "offer", SDP: opusOfferSDP()})
 		answers <- answerErr
 	}
 	go answer()
@@ -404,65 +252,6 @@ func TestPionTransportCloseUnblocksAudioSource(t *testing.T) {
 
 func contains(value, part string) bool {
 	return strings.Contains(value, part)
-}
-
-type rtpTrackRecorder struct {
-	mu      sync.Mutex
-	packets []*rtp.Packet
-}
-
-type blockingRTPTrackRecorder struct {
-	started chan struct{}
-	release chan struct{}
-}
-
-type failingRTPTrackRecorder struct{ err error }
-
-type partialFailureRTPTrackRecorder struct {
-	mu      sync.Mutex
-	packets []*rtp.Packet
-	failAt  int
-	err     error
-	failed  bool
-}
-
-func (r *failingRTPTrackRecorder) WriteRTP(*rtp.Packet) error { return r.err }
-
-func (r *partialFailureRTPTrackRecorder) WriteRTP(packet *rtp.Packet) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if !r.failed && len(r.packets)+1 == r.failAt {
-		r.failed = true
-		return r.err
-	}
-	r.packets = append(r.packets, packet.Clone())
-	return nil
-}
-
-func (r *partialFailureRTPTrackRecorder) Packets() []*rtp.Packet {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return append([]*rtp.Packet(nil), r.packets...)
-}
-
-func (r *blockingRTPTrackRecorder) WriteRTP(*rtp.Packet) error {
-	close(r.started)
-	<-r.release
-	return nil
-}
-
-func (r *rtpTrackRecorder) WriteRTP(packet *rtp.Packet) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	copyPacket := packet.Clone()
-	r.packets = append(r.packets, copyPacket)
-	return nil
-}
-
-func (r *rtpTrackRecorder) Packets() []*rtp.Packet {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return append([]*rtp.Packet(nil), r.packets...)
 }
 
 type dataChannelRecorder struct {
