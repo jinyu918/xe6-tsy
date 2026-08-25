@@ -2,7 +2,7 @@
 
 Lingow Web 对话入口（联调/验收前端）。
 
-当前实现来自 realtime mock 联调页：匿名鉴权、voice-sessions、语言配置、API 签发 realtime ticket、WebRTC、字幕、助手回复与 TTS 播放。
+当前实现来自 realtime mock 联调页：手机号验证码登录、voice-sessions、语言配置、API 签发 realtime ticket、WebRTC、字幕、助手回复与 TTS 播放。
 
 ## 技术栈
 
@@ -32,6 +32,8 @@ npm run dev
 
 打开 [http://localhost:3000](http://localhost:3000)。Windows 也可：`.\start-windows.ps1`。
 
+Web 端进入语音界面前必须使用中国大陆手机号登录。开发环境使用日志验证码发送器时，验证码由根目录 `.env` 的 `VERIFICATION_UNIVERSAL_CODE` 配置（当前本地测试码为 `8888`）；生产环境应接入实际短信供应商。
+
 ## 环境变量
 
 见 [CONFIG.md](./CONFIG.md)。Next 会把浏览器请求代理到后端：
@@ -50,6 +52,7 @@ npm run dev
 | `npm run test` | Vitest |
 | `npm run typecheck` | TypeScript |
 | `npm run test:e2e` | Playwright |
+| `npm run test:e2e:system` | 真实 API、realtime-audio、PostgreSQL、Redis 和 WebRTC 系统验收（需先启动后端） |
 | `npm run lint` | ESLint |
 | `npm run sync-kws-models` | 手动同步 KWS 模型/WASM（通常不必；`dev`/`build`/`postinstall` 会自动跑） |
 
@@ -89,6 +92,11 @@ Coordinator 负责后续执行。连接断开也不会自动创建第二条 Peer
 后端不接收 KWS 音频流或模型。设备接入字段和重试规则见 `docs/DEVICE_KWS_INTEGRATION.md`。
 
 `npm install` / `npm run dev` / `npm run build` 会自动把缺失的 int8 模型与 `.wasm` 拉到 `public/kws/`（已存在则跳过）。首次需要能访问 GitHub Releases 与 jsDelivr；离线时可设 `LINGOW_SKIP_KWS_SYNC=1`，让下载失败不阻断命令。详见 `public/kws/README.md`。
+
+真实系统 E2E 由 `.github/workflows/system-e2e.yml` 在 CI 中启动 PostgreSQL、Redis、API、
+realtime-audio 和 Web，再执行 `npm run test:e2e:system`。该场景使用 mock ASR/翻译/TTS，
+但使用真实 HTTP、数据库、Redis、Pion WebRTC 和 API 会话生命周期；第三方模型质量、真实麦克风
+和硬件仍属于单独的手动验收范围。
 
 ## 职责边界
 

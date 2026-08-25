@@ -4,7 +4,7 @@
 
 ## 当前内容
 
-- `docker-compose.yml`：PostgreSQL 16 与 Redis/Valkey 7，供 API 与 realtime-audio 本地联调。
+- `docker-compose.yml`：PostgreSQL 16 与 Redis/Valkey 7，供 API 与 realtime-audio 本地联调。默认暴露 `5432` 和 `6379`；使用 `LINGOW_POSTGRES_PORT`、`LINGOW_REDIS_PORT` 可改为未占用的宿主机端口，并同步更新根目录 `DATABASE_URL`、`REDIS_URL`。
 - `realtime-gateway/nginx.conf`：可选的双 realtime 实例会话哈希网关。
 
 ## 本地启动（Member5 控制面）
@@ -82,5 +82,5 @@ infra/realtime-gateway/smoke-test.sh
 
 ## 后续
 
-- API / realtime-audio 独立部署 manifest
+- [生产 Docker Compose 部署](./production/README.md)：Web、API 与 realtime-audio 镜像、GitHub Actions 发布和所需 GitHub Environment 配置。
 - 生产环境密钥与 Valkey consumer 命名规范

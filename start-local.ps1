@@ -125,13 +125,10 @@ function Wait-PostgresReady {
   )
 
   Write-Host "==> Waiting for Docker Postgres..."
+  $endpoint = Get-EndpointFromUrl -Url $env:DATABASE_URL -DefaultPort 5432
   for ($i = 0; $i -lt $TimeoutSeconds; $i++) {
-    $code = Invoke-Compose -ComposeArgs @(
-      "-f", $ComposeFile, "exec", "-T", "postgres",
-      "pg_isready", "-U", "postgres", "-h", "localhost"
-    )
-    if ($code -eq 0) {
-      Write-Host "    Docker Postgres is ready."
+    if (Test-TcpOpen -HostName $endpoint.Host -Port $endpoint.Port) {
+      Write-Host "    Docker Postgres is reachable at $($endpoint.Host):$($endpoint.Port)."
       return
     }
     Start-Sleep -Seconds 1
