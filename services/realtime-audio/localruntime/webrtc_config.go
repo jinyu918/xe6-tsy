@@ -6,20 +6,25 @@ import (
 	"strings"
 	"time"
 
+	realtimev1 "github.com/1024XEngineer/xe6-tsy/packages/contracts/realtime/v1"
 	"github.com/1024XEngineer/xe6-tsy/services/realtime-audio/controlplane"
 )
 
-var errSessionIDRequired = errors.New("session_id is required")
+var (
+	errSessionIDRequired  = errors.New("session_id is required")
+	errICEServersRequired = errors.New("ICE servers are required")
+)
 
 // StaticWebRTCConfig returns a session-scoped WebRTC config for browser clients.
 type StaticWebRTCConfig struct {
-	ICEServers    []controlplane.ICEServer
-	TTL           time.Duration
-	Now           func() time.Time
-	UplinkCodec   string
-	DownlinkCodec string
-	SampleRateHz  int
-	Channels      int
+	ICEServers         []controlplane.ICEServer
+	ICETransportPolicy string
+	TTL                time.Duration
+	Now                func() time.Time
+	UplinkCodec        string
+	DownlinkCodec      string
+	SampleRateHz       int
+	Channels           int
 }
 
 func (c StaticWebRTCConfig) GetConfig(_ context.Context, sessionID string) (controlplane.WebRTCConfig, error) {
@@ -37,9 +42,7 @@ func (c StaticWebRTCConfig) GetConfig(_ context.Context, sessionID string) (cont
 	}
 	servers := c.ICEServers
 	if len(servers) == 0 {
-		servers = []controlplane.ICEServer{{
-			URLs: []string{"stun:stun.l.google.com:19302"},
-		}}
+		return controlplane.WebRTCConfig{}, errICEServersRequired
 	}
 	uplink := strings.TrimSpace(c.UplinkCodec)
 	if uplink == "" {
@@ -57,14 +60,26 @@ func (c StaticWebRTCConfig) GetConfig(_ context.Context, sessionID string) (cont
 	if channels <= 0 {
 		channels = 1
 	}
+	policy := strings.ToLower(strings.TrimSpace(c.ICETransportPolicy))
+	if policy == "" {
+		policy = "all"
+	}
+	if policy != "all" && policy != "relay" {
+		return controlplane.WebRTCConfig{}, errors.New("ICE transport policy must be all or relay")
+	}
 	return controlplane.WebRTCConfig{
 		SessionID:          sessionID,
 		ExpiresAt:          now().Add(ttl),
 		ICEServers:         append([]controlplane.ICEServer(nil), servers...),
-		ICETransportPolicy: "all",
+		ICETransportPolicy: policy,
 		DataChannel: controlplane.DataChannelConfig{
 			Label:   "translation-events",
 			Ordered: true,
+		},
+		ControlDataChannel: controlplane.ControlDataChannelConfig{
+			Label:           realtimev1.ControlDataChannelLabel,
+			Ordered:         true,
+			ProtocolVersion: realtimev1.ControlProtocolVersion,
 		},
 		Audio: controlplane.AudioConfig{
 			UplinkCodec:   uplink,

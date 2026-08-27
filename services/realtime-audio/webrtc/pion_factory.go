@@ -24,8 +24,10 @@ type ICEServerConfig struct {
 
 // PionTransportConfig supplies the STUN/TURN servers used by new PeerConnections.
 type PionTransportConfig struct {
-	ICEServers []ICEServerConfig
-	Media      MediaConfig
+	ICEServers         []ICEServerConfig
+	ICETransportPolicy string
+	Media              MediaConfig
+	Control            ControlConfig
 }
 
 // PionTransportFactory creates one Pion PeerConnection per connection generation.
@@ -34,6 +36,7 @@ type PionTransportFactory struct {
 	newPeerConnection func(pion.Configuration) (pionPeerConnection, error)
 	now               func() time.Time
 	media             MediaConfig
+	control           ControlConfig
 }
 
 type pionPeerConnection interface {
@@ -74,6 +77,14 @@ func (p *pionPeerConnectionAdapter) OnTrack(handler func(pionRemoteTrack)) {
 	})
 }
 
+func (p *pionPeerConnectionAdapter) OnDataChannel(handler func(pionInboundDataChannel)) {
+	p.PeerConnection.OnDataChannel(func(channel *pion.DataChannel) {
+		if handler != nil {
+			handler(channel)
+		}
+	})
+}
+
 type pionRemoteTrackAdapter struct {
 	track *pion.TrackRemote
 }
@@ -106,8 +117,9 @@ func NewPionTransportFactory(config PionTransportConfig) (*PionTransportFactory,
 			}
 			return &pionPeerConnectionAdapter{PeerConnection: connection}, nil
 		},
-		now:   func() time.Time { return time.Now().UTC() },
-		media: mediaConfig,
+		now:     func() time.Time { return time.Now().UTC() },
+		media:   mediaConfig,
+		control: config.Control,
 	}, nil
 }
 
@@ -146,14 +158,47 @@ func (f *PionTransportFactory) Create(
 		}
 		onState(mapped, now())
 	})
-	transport := &PionTransport{peerConnection: connection}
+	transport := &PionTransport{
+		peerConnection: connection,
+		wakeWords:      newPionWakeWordSource(defaultWakeWordQueueCapacity),
+	}
+	mediaLabel := f.media.DataChannelLabel
 	if mediaConnection, ok := connection.(pionMediaPeerConnection); ok {
 		if err := configurePionMedia(transport, mediaConnection, f.media, now); err != nil {
 			_ = connection.Close()
 			return nil, err
 		}
+		mediaLabel = transport.mediaConfig.DataChannelLabel
+	}
+	if inboundConnection, ok := connection.(pionInboundDataChannelPeerConnection); ok {
+		configurePionIngress(transport, inboundConnection, mediaLabel, sessionID, connectionID, f.control.Handler)
 	}
 	return transport, nil
+}
+
+// configurePionIngress owns Pion's one callback so optional protocols cannot replace each other.
+func configurePionIngress(
+	transport *PionTransport,
+	connection pionInboundDataChannelPeerConnection,
+	mediaLabel string,
+	sessionID string,
+	connectionID string,
+	handler ControlCommandHandler,
+) {
+	connection.OnDataChannel(func(channel pionInboundDataChannel) {
+		if channel == nil {
+			return
+		}
+		switch channel.Label() {
+		case realtimev1.ControlDataChannelLabel:
+			control, ok := channel.(pionControlDataChannel)
+			if ok && handler != nil {
+				transport.attachControlChannel(control, handler, sessionID, connectionID)
+			}
+		case mediaLabel:
+			attachPionWakeWordIngress(transport.wakeWords, channel)
+		}
+	})
 }
 
 func configurePionMedia(transport *PionTransport, connection pionMediaPeerConnection, config MediaConfig, now func() time.Time) error {
@@ -278,7 +323,16 @@ func newPionAPI(config MediaConfig) (*pion.API, error) {
 }
 
 func pionConfiguration(config PionTransportConfig) (pion.Configuration, error) {
-	configuration := pion.Configuration{ICEServers: make([]pion.ICEServer, 0, len(config.ICEServers))}
+	var policy pion.ICETransportPolicy
+	switch strings.ToLower(strings.TrimSpace(config.ICETransportPolicy)) {
+	case "", "all":
+		policy = pion.ICETransportPolicyAll
+	case "relay":
+		policy = pion.ICETransportPolicyRelay
+	default:
+		return pion.Configuration{}, fmt.Errorf("%w: ICE transport policy must be all or relay", ErrICEConfigurationInvalid)
+	}
+	configuration := pion.Configuration{ICETransportPolicy: policy, ICEServers: make([]pion.ICEServer, 0, len(config.ICEServers))}
 	for serverIndex, server := range config.ICEServers {
 		if len(server.URLs) == 0 {
 			return pion.Configuration{}, fmt.Errorf("%w: server %d has no URLs", ErrICEConfigurationInvalid, serverIndex)

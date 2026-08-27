@@ -8,12 +8,14 @@
     "postinstall": "node ./scripts/sync-kws-models.mjs --optional",
     "dev": "next dev",
     "build": "next build",
+    "build:pages": "next build",
     "start": "next start",
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:e2e": "playwright test",
+    "test:e2e:system": "playwright test --config=playwright.system.config.ts",
     "sync-kws-models": "node ./scripts/sync-kws-models.mjs"
   },
   "dependencies": {

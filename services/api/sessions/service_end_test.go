@@ -3,6 +3,7 @@ package sessions
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -255,6 +256,13 @@ func TestServiceEndRejectsInvalidInput(t *testing.T) {
 			name: "missing idempotency key",
 			mutate: func(input *EndInput) {
 				input.IdempotencyKey = ""
+			},
+			want: ErrInvalidRequest,
+		},
+		{
+			name: "oversized idempotency key",
+			mutate: func(input *EndInput) {
+				input.IdempotencyKey = strings.Repeat("k", maxIdempotencyKeyLength+1)
 			},
 			want: ErrInvalidRequest,
 		},
@@ -598,7 +606,7 @@ func TestServiceEndActiveStopErrorPreservesSession(t *testing.T) {
 
 func TestServiceEndActiveStopTimeoutPreservesSession(t *testing.T) {
 	fixture := newEndFixture(t, StatusActive)
-	ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
 	fixture.realtime.stopHook = func(ctx context.Context) {
 		<-ctx.Done()

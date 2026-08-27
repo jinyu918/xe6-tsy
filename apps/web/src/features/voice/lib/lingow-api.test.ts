@@ -1,10 +1,25 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
+  bindEmailTarget,
+  bindWeChatTarget,
+  createLanguageConfig,
   getAccountUsageSummary,
+  hasReadyAutomaticTarget,
   listSessionTurns,
+  listMessagePreferences,
+  listMessageTargets,
+  listAutomaticOutputStatus,
+  listOutboundMessages,
   listSupportedLanguages,
   listVoiceSessions,
+  loginWithPhone,
+  logoutAccount,
+  putMessagePreference,
+  requestEmailBindVerification,
+  requestPhoneVerificationCode,
+  resolveVoiceInitialMode,
+  revokeMessageTarget,
   startVoiceSession,
 } from "./lingow-api";
 
@@ -42,6 +57,18 @@ describe("startVoiceSession", () => {
         RequestInit | undefined,
       ]>).map(([, init]) => new Headers(init?.headers).get("Idempotency-Key")),
     ).toEqual(["start-fixed", "start-fixed"]);
+    const [, init] = fetchMock.mock.calls[0] as unknown as [RequestInfo, RequestInit];
+    expect(init.body).toBeUndefined();
+  });
+
+  it("sends an explicit assistant initial mode when requested", async () => {
+    const fetchMock = vi.fn(async () => jsonResponse({ id: "vs-1", status: "active" }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await startVoiceSession("token-1", "vs-1", "start-assistant", undefined, "assistant");
+
+    const [, init] = fetchMock.mock.calls[0] as unknown as [RequestInfo, RequestInit];
+    expect(JSON.parse(String(init.body))).toEqual({ initial_mode: "assistant" });
   });
 
   it("cancels the retry delay when the caller aborts", async () => {
@@ -65,6 +92,129 @@ describe("startVoiceSession", () => {
 
     await expect(pending).rejects.toMatchObject({ name: "AbortError" });
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps legacy callers bodyless", async () => {
+    const fetchMock = vi.fn(async () =>
+      jsonResponse({ id: "vs-1", status: "active" }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await startVoiceSession("token-1", "vs-1", "start-fixed");
+
+    const [, init] = fetchMock.mock.calls[0] as unknown as [
+      RequestInfo | URL,
+      RequestInit,
+    ];
+    expect(init.body).toBeUndefined();
+  });
+});
+
+describe("phone authentication", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("requests a verification challenge with the canonical phone", async () => {
+    const fetchMock = vi.fn(async () =>
+      jsonResponse({ challenge_id: "challenge-1" }, 201),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(requestPhoneVerificationCode("+8613800000000")).resolves.toEqual({
+      challenge_id: "challenge-1",
+    });
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/v1/auth/verification-codes",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({ phone: "+8613800000000" }),
+      }),
+    );
+  });
+
+  it("logs in with a challenge and can revoke the refresh token", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) =>
+      String(input).endsWith("/logout")
+        ? new Response(null, { status: 204 })
+        : jsonResponse({
+            account: {
+              id: "acc-1",
+              kind: "registered",
+              created_at: "2026-08-20T00:00:00Z",
+            },
+            tokens: {
+              access_token: "access-1",
+              refresh_token: "refresh-1",
+              expires_at: "2099-08-20T01:00:00Z",
+            },
+          }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(loginWithPhone("challenge-1", "8888")).resolves.toMatchObject({
+      account: { kind: "registered" },
+    });
+    await expect(logoutAccount("refresh-1")).resolves.toBeUndefined();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const [, loginInit] = fetchMock.mock.calls[0] as unknown as [RequestInfo, RequestInit];
+    expect(JSON.parse(String(loginInit.body))).toEqual({
+      challenge_id: "challenge-1",
+      code: "8888",
+    });
+    const [, logoutInit] = fetchMock.mock.calls[1] as unknown as [RequestInfo, RequestInit];
+    expect(JSON.parse(String(logoutInit.body))).toEqual({ refresh_token: "refresh-1" });
+  });
+});
+
+describe("resolveVoiceInitialMode", () => {
+  it("defaults the new client to assistant", () => {
+    expect(resolveVoiceInitialMode(undefined)).toBe("assistant");
+  });
+
+  it("supports an interpretation rollback and rejects unknown modes", () => {
+    expect(resolveVoiceInitialMode(" interpretation ")).toBe("interpretation");
+    expect(resolveVoiceInitialMode("english_practice")).toBe("interpretation");
+  });
+});
+
+describe("createLanguageConfig", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("sends output routes and the expected version for an active switch", async () => {
+    const fetchMock = vi.fn(async () =>
+      jsonResponse({
+        id: "cfg-2",
+        session_id: "vs-1",
+        version: 2,
+        language_pairs: [],
+        output_routes: [],
+        output_mode: "single",
+        status: "active",
+        effective_from: "2026-08-07T00:00:00Z",
+        effective_until: null,
+        created_by: "acc-1",
+        created_at: "2026-08-07T00:00:00Z",
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await createLanguageConfig("access-1", "vs-1", {
+      sourceLanguage: "zh-CN",
+      targetLanguage: "en-US",
+      outputMode: "single",
+    }, 1);
+
+    const [, init] = fetchMock.mock.calls[0] as unknown as [RequestInfo, RequestInit];
+    expect(JSON.parse(String(init.body))).toMatchObject({
+      expected_version: 1,
+      output_routes: [
+        { target_language: "en-US", tts_enabled: true, delivery_enabled: false },
+        { target_language: "zh-CN", tts_enabled: false, delivery_enabled: true },
+      ],
+    });
   });
 });
 
@@ -151,6 +301,120 @@ describe("getAccountUsageSummary", () => {
     ]>;
     expect(new Headers(calls[0]?.[1].headers).get("Authorization")).toBe(
       "Bearer access-1",
+    );
+  });
+});
+
+describe("hasReadyAutomaticTarget", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("uses server-computed automatic delivery readiness", async () => {
+    const fetchMock = vi.fn(async () => jsonResponse({ ready: true }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(hasReadyAutomaticTarget("access-1")).resolves.toBe(true);
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/v1/account/automatic-delivery-readiness",
+      expect.objectContaining({ cache: "no-store" }),
+    );
+  });
+
+  it("returns false when the server reports delivery is unavailable", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => jsonResponse({ ready: false })),
+    );
+
+    await expect(hasReadyAutomaticTarget("access-1")).resolves.toBe(false);
+  });
+});
+
+describe("delivery settings API", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("uses account delivery routes and targets the selected destination", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes("verification-codes")) return new Response(null, { status: 202 });
+      if (init?.method === "DELETE") return new Response(null, { status: 204 });
+      if (url.endsWith("/message-targets?channel=email")) {
+        return jsonResponse({ items: [] });
+      }
+      if (url.endsWith("/message-targets")) return jsonResponse({ items: [] });
+      if (url.endsWith("/message-preferences")) return jsonResponse({ items: [] });
+      if (url.endsWith("/outbound-messages")) return jsonResponse({ items: [] });
+      if (url.includes("message-preferences/email")) {
+        return jsonResponse({
+          account_id: "acc-1",
+          channel: "email",
+          destination_ref: "email-1",
+          enabled: true,
+          verified: true,
+          updated_at: "2026-08-07T00:00:00Z",
+        });
+      }
+      if (url.includes("email/bind")) {
+        return jsonResponse({
+          destination_ref: "email-1",
+          channel: "email",
+          verified: true,
+          revoked_at: null,
+          updated_at: "2026-08-07T00:00:00Z",
+        });
+      }
+      if (url.includes("wechat/bind")) {
+        return jsonResponse({
+          destination_ref: "wechat-1",
+          channel: "wechat",
+          verified: true,
+          revoked_at: null,
+          updated_at: "2026-08-07T00:00:00Z",
+        });
+      }
+      return jsonResponse({}, 500);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await listMessageTargets("access-1", "email");
+    await listMessagePreferences("access-1");
+    await listOutboundMessages("access-1");
+    await putMessagePreference("access-1", "email", "email-1", true);
+    await requestEmailBindVerification("access-1", "person@example.com");
+    await bindEmailTarget("access-1", "dev:person@example.com");
+    await bindWeChatTarget("access-1", "oauth-code");
+    await revokeMessageTarget("access-1", "email", "email-1");
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/v1/account/message-targets?channel=email",
+      expect.objectContaining({ cache: "no-store" }),
+    );
+    const preferenceCall = fetchMock.mock.calls.find(([input]) =>
+      String(input).includes("message-preferences/email/email-1"),
+    );
+    expect(JSON.parse(String(preferenceCall?.[1]?.body))).toEqual({ enabled: true });
+    expect(new Headers(preferenceCall?.[1]?.headers).get("Idempotency-Key")).toMatch(
+      /^preference-/,
+    );
+  });
+
+  it("lists automatic output recovery status for a session", async () => {
+    const fetchMock = vi.fn(async () =>
+      jsonResponse({
+        items: [{ turn_id: "turn-1", status: "restored", updated_at: "2026-08-07T00:00:00Z" }],
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(listAutomaticOutputStatus("access-1", "session/1")).resolves.toEqual({
+      items: [{ turn_id: "turn-1", status: "restored", updated_at: "2026-08-07T00:00:00Z" }],
+    });
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/v1/voice-sessions/session%2F1/automatic-output-status",
+      expect.objectContaining({ cache: "no-store" }),
     );
   });
 });
