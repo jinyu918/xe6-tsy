@@ -794,17 +794,6 @@ func TestPipelineMarksPrePlaybackFallbackFailures(t *testing.T) {
 			svc:  &PipelineService{},
 		},
 		{
-			name: "runtime report failure",
-			svc: newTestPipelineService(PipelineDependencies{
-				Translator: &translate.FakeProvider{Result: translate.Result{Text: "hello"}},
-				TTS: tts.NewFakeProvider(tts.FakeProviderConfig{
-					Chunks: []tts.AudioChunk{{SequenceNo: 1, Data: []byte{1, 2}}},
-				}),
-				FinalTurns: &recordingFinalSink{}, Usage: &recordingUsageSink{}, Audio: &recordingAudioSink{},
-				Runtime: stateFailingRuntimeReporter{failState: session.RuntimeTTSProcessing, err: errors.New("runtime unavailable")},
-			}),
-		},
-		{
 			name: "tts start failure",
 			svc: newTestPipelineService(PipelineDependencies{
 				Translator: &translate.FakeProvider{Result: translate.Result{Text: "hello"}},
@@ -826,6 +815,26 @@ func TestPipelineMarksPrePlaybackFallbackFailures(t *testing.T) {
 				t.Fatalf("PlayFallback() error = %v, want not-started marker", err)
 			}
 		})
+	}
+}
+
+func TestPipelineFallbackDoesNotClaimStaleRuntimeTurn(t *testing.T) {
+	service := newTestPipelineService(PipelineDependencies{
+		Translator: &translate.FakeProvider{},
+		TTS: tts.NewFakeProvider(tts.FakeProviderConfig{
+			Chunks: []tts.AudioChunk{{SequenceNo: 1, Data: []byte{1, 2}}},
+			Result: tts.Result{Provider: "mock-tts", Model: "v1"},
+		}),
+		FinalTurns: &recordingFinalSink{}, Usage: &recordingUsageSink{}, Audio: &recordingAudioSink{},
+		// A strict runtime would reject the completed fallback Turn as an owner
+		// while the session is listening. Fallback must still play successfully.
+		Runtime: stateFailingRuntimeReporter{failState: session.RuntimeTTSProcessing, err: session.ErrRuntimeIdentityConflict},
+	})
+	if err := service.PlayFallback(t.Context(), FallbackPlayback{
+		SessionID: "session-1", TurnID: "turn-1", AccountID: "account-1", TraceID: "trace-1",
+		TargetLanguage: "zh-CN", TranslatedText: "补播译文", LanguageConfigVersion: 1, PlaybackID: "fallback-operation-1",
+	}); err != nil {
+		t.Fatalf("PlayFallback() error = %v, want successful recovery playback", err)
 	}
 }
 
@@ -986,6 +995,40 @@ func TestPipelineReusesPendingPhraseInAsyncSettlement(t *testing.T) {
 	}
 }
 
+func TestWaitFinalSettlementsDoesNotWaitForPlaybackAdmission(t *testing.T) {
+	translator := &translate.FakeProvider{Result: translate.Result{Text: "hello", Provider: "mock", Model: "v1"}}
+	phraseCoordinator := NewPhraseTranslationCoordinator(translator, "mock", &recordingPhraseSubtitleObserver{}, nil)
+	playback := newBlockingEnqueuePhrasePlaybackScheduler()
+	service := newTestPipelineService(PipelineDependencies{
+		Translator: translator, TTS: tts.NewFakeProvider(tts.FakeProviderConfig{}),
+		FinalTurns: &recordingFinalSink{}, Usage: &recordingUsageSink{},
+		Audio: &recordingAudioSink{}, Runtime: &recordingRuntimeReporter{},
+		PhraseTranslations: phraseCoordinator, PhrasePlayback: playback,
+	})
+	defer func() {
+		close(playback.releaseEnqueue)
+		service.Close()
+	}()
+	turn := testTurn()
+	turn.Mode.RuntimeInstanceID = "runtime-1"
+
+	if err := service.HandleASRFinalAsync(context.Background(), turn, asr.FinalResult{
+		Text: "你好", SourceLanguage: "zh-CN", Provider: "mock-asr", Model: "v1",
+	}); err != nil {
+		t.Fatalf("HandleASRFinalAsync() error = %v", err)
+	}
+	select {
+	case <-playback.enqueueStarted:
+	case <-time.After(time.Second):
+		t.Fatal("final settlement did not reach playback admission")
+	}
+	waitCtx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	if err := service.WaitFinalSettlements(waitCtx, turn.SessionID, turn.Mode.RuntimeInstanceID); err != nil {
+		t.Fatalf("WaitFinalSettlements() waited past FinalTurn commit: %v", err)
+	}
+}
+
 func TestPipelineTranslatesFinalFlushTailOnceAndAggregatesUsage(t *testing.T) {
 	phraseCoordinator := NewPhraseTranslationCoordinator(phraseTranslateFunc(func(_ context.Context, request translate.Request) (translate.Result, error) {
 		return translate.Result{Text: "hello", Provider: "mock", Model: "v1", InputTokens: 1, CostAmount: "0.10", Currency: "USD"}, nil
@@ -1076,6 +1119,59 @@ func TestPipelineSettlesFailedPhraseIntoCompleteFinalTranslationOnce(t *testing.
 	}
 	if len(usage.facts) != 1 || usage.facts[0].IdempotencyKey != "usage:turn-1:translation" || usage.facts[0].InputTokens != 6 || usage.facts[0].CostAmount != "0.6" {
 		t.Fatalf("translation usage = %#v, want one aggregate fact", usage.facts)
+	}
+}
+
+func TestPipelineKeepsIntermediateResidualBeforeLaterPhrasePlayback(t *testing.T) {
+	ttsProvider := &recordingTTSProvider{}
+	audio := &recordingPhraseAudio{}
+	scheduler := newTestPhrasePlaybackScheduler(ttsProvider, audio)
+	phraseCoordinator := NewPhraseTranslationCoordinator(phraseTranslateFunc(func(_ context.Context, request translate.Request) (translate.Result, error) {
+		if request.Text == "失败" {
+			return translate.Result{}, translate.ErrUnexpectedBehavior
+		}
+		return translate.Result{Text: "phrase-" + request.Text, Provider: "phrase", Model: "v1"}, nil
+	}), "phrase", &recordingPhraseSubtitleObserver{}, nil)
+	phraseCoordinator.SetPhrasePlaybackScheduler(scheduler)
+	translator := &translate.FakeProvider{Result: translate.Result{Text: "retry-en", Provider: "mock", Model: "v1"}}
+	service := newTestPipelineService(PipelineDependencies{
+		Translator: translator, TTS: ttsProvider,
+		FinalTurns: &recordingFinalSink{}, Usage: &recordingUsageSink{}, Audio: audio, Runtime: &recordingRuntimeReporter{},
+		PhraseTranslations: phraseCoordinator, PhrasePlayback: scheduler,
+	})
+	turn := testTurn()
+	turn.LanguageConfig.OutputRoutes = []session.OutputRoute{{TargetLanguage: "en-US", TTSEnabled: true}}
+	phraseCoordinator.StartPhraseSubtitleTurn(turn, "zh-CN")
+	for sequence, text := range map[int64]string{1: "你好", 2: "失败", 3: "世界"} {
+		phraseCoordinator.ObservePhraseSubtitle(context.Background(), stablePhraseEvent(turn, sequence, text))
+	}
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		phraseCoordinator.mu.Lock()
+		utterance := phraseCoordinator.utterances[turn.ID]
+		done := utterance != nil && allPhraseTranslationsDone(utterance)
+		phraseCoordinator.mu.Unlock()
+		if done {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if !audio.waitFor(1, time.Second) {
+		t.Fatal("successful prefix phrase did not play")
+	}
+	if requests := ttsProvider.requests(); len(requests) != 1 || requests[0].Text != "phrase-你好" {
+		t.Fatalf("prefix playback requests = %#v, want only phrase 1 before final residual", requests)
+	}
+
+	if err := service.HandleASRFinal(context.Background(), turn, asr.FinalResult{Text: "你好失败世界", SourceLanguage: "zh-CN"}); err != nil {
+		t.Fatalf("HandleASRFinal() error = %v", err)
+	}
+	if !audio.waitFor(3, time.Second) {
+		t.Fatal("ordered residual and later phrase playback did not complete")
+	}
+	requests := ttsProvider.requests()
+	if len(requests) != 3 || requests[0].Text != "phrase-你好" || requests[1].Text != "retry-en" || requests[2].Text != "phrase-世界" {
+		t.Fatalf("playback requests = %#v, want phrase 1, residual phrase 2, phrase 3", requests)
 	}
 }
 

@@ -354,6 +354,9 @@ func newControlPlaneHandlerWithConfig(cfg processConfig) (http.Handler, error) {
 	if err != nil {
 		return nil, fmt.Errorf("configure command language client: %w", err)
 	}
+	commandLanguages := languageconfig.LegacyFallbackReader{
+		Primary: languageConfigurator, Fallback: languages,
+	}
 	// Local Silero (or energy) VAD owns utterance cuts; disable Qwen server_vad unless set.
 	if strings.TrimSpace(os.Getenv("ASR_SERVER_VAD")) == "" {
 		providerConfig.ASR.ServerVAD = false
@@ -399,6 +402,7 @@ func newControlPlaneHandlerWithConfig(cfg processConfig) (http.Handler, error) {
 		NewCommandClassifier:  newCommandClassifier,
 		NewCommandInterpreter: commandInterpreterFactory(providerConfig.Command),
 		LanguageConfigurator:  languageConfigurator,
+		CommandLanguages:      commandLanguages,
 		CommandResults:        localruntime.NewDataChannelCommandResultSink(connections, metricRegistry),
 		CommandObserver:       metricRegistry,
 		Languages:             languages,
@@ -429,6 +433,13 @@ func newControlPlaneHandlerWithConfig(cfg processConfig) (http.Handler, error) {
 	if err := controlHandler.SetModeControl(manager); err != nil {
 		return nil, fmt.Errorf("configure WebRTC control channel: %w", err)
 	}
+	slog.Info("realtime-audio streaming configuration",
+		"phrase_subtitles_enabled", cfg.PhraseSubtitles,
+		"phrase_playback_enabled", cfg.PhrasePlayback && cfg.DownlinkMode == "opus",
+		"tts_downlink", cfg.DownlinkMode,
+		"asr_server_vad", providerConfig.ASR.ServerVAD,
+		"translation_provider", providerConfig.Translation.Provider,
+		"translation_model", providerConfig.Translation.Model)
 
 	lifecycle, err := session.NewLifecycleService(session.Dependencies{
 		Sessions:    sessions,
@@ -517,14 +528,15 @@ func usageOutboxEnabled(getenv func(string) string) bool {
 }
 
 const (
-	localVADSilenceAfter  = 800 * time.Millisecond
-	localVADMaxDuration   = 12 * time.Second
-	localVADPrefixPadding = 500 * time.Millisecond
+	localVADSilenceAfter        = 550 * time.Millisecond
+	localVADMaxDuration         = 0                // natural silence owns Turn boundaries
+	localVADMaxBufferedDuration = 10 * time.Minute // resource watchdog only; not a normal sentence boundary
+	localVADPrefixPadding       = 500 * time.Millisecond
 )
 
 // newLocalVADFactories wires ordinary and command utterance cutters from one provider
-// configuration. Each call returns isolated classifier state, while provider type, thresholds,
-// end silence, maximum duration, and prefix padding remain identical across both audio paths.
+// configuration. Each call returns isolated classifier state and shares the provider thresholds,
+// natural end-silence, and prefix padding across both audio paths.
 func newLocalVADFactories(getenv func(string) string) (
 	runtime.SegmenterFactory,
 	runtime.CommandClassifierFactory,
@@ -532,9 +544,10 @@ func newLocalVADFactories(getenv func(string) string) (
 ) {
 	cfg := silero.LoadLocalConfigFromEnv(getenv)
 	options := vad.Options{
-		SilenceAfter:  localVADSilenceAfter,
-		MaxDuration:   localVADMaxDuration,
-		PrefixPadding: localVADPrefixPadding,
+		SilenceAfter:        localVADSilenceAfter,
+		MaxDuration:         localVADMaxDuration,
+		MaxBufferedDuration: localVADMaxBufferedDuration,
+		PrefixPadding:       localVADPrefixPadding,
 	}
 	switch cfg.Provider {
 	case silero.ProviderEnergy:

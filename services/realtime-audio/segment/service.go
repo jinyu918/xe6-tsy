@@ -192,7 +192,10 @@ func (s *Service) Run(ctx context.Context, request Request) (returnErr error) {
 			}
 		}
 	}
-	wakeSignals := make(chan receivedWakeWord, 1)
+	// Keep wake delivery synchronized with the media loop. A buffered channel can
+	// let the detector report a wake while the next audio frame is already routed
+	// through ordinary VAD, allowing command audio to leak into a normal Turn.
+	wakeSignals := make(chan receivedWakeWord)
 	wakeDone := make(chan struct{})
 	if s.command != nil && s.wakeWords != nil {
 		go s.receiveWakeWords(runCtx, wakeSignals, wakeDone)
@@ -458,6 +461,7 @@ func (s *Service) logVADCheckpoint(request Request, event vad.Event) {
 			"stage", "vad_final",
 			"session_id", request.SessionID,
 			"trace_id", request.TraceID,
+			"reason", event.Reason,
 			"started_at", event.StartedAt,
 			"ended_at", event.EndedAt,
 			"segment_audio_ms", event.EndedAt.Sub(event.StartedAt).Milliseconds(),

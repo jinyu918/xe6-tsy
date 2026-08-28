@@ -3,10 +3,12 @@ package pipeline
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"math/big"
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	realtimev1 "github.com/1024XEngineer/xe6-tsy/packages/contracts/realtime/v1"
 	"github.com/1024XEngineer/xe6-tsy/services/realtime-audio/asr"
@@ -18,6 +20,12 @@ type PhraseTranslationSummary struct {
 	Text, Provider, Model, CostAmount, Currency string
 	InputTokens, OutputTokens                   int64
 	ResidualSegments                            []string
+	PlaybackResidualText                        string
+	// PlaybackResidualSegments preserves phrase order when a failed or
+	// unaccepted phrase leaves later translated text waiting behind it.
+	// PlaybackResidualText remains the compact representation for callers that
+	// only need a single fallback string.
+	PlaybackResidualSegments []string
 }
 
 // PhraseTranslationCoordinator translates stable source phrases without blocking ASR reads.
@@ -53,22 +61,27 @@ type phraseTranslationUtterance struct {
 	phrases        map[int64]*translatedPhrase
 	next           int64
 	observerMu     sync.Mutex
+	playbackMu     sync.Mutex
 	sourceTail     chan struct{}
 	sourceOnly     bool
 	playbackNext   int64
 	playbackReady  map[int64]*translatedPhrase
+	playbackFailed bool
 }
 
 type translatedPhrase struct {
-	event              realtimev1.PhraseSubtitleEvent
-	result             translate.Result
-	err                error
-	done               bool
-	translationStarted bool
-	doneCh             chan struct{}
-	playbackDoneCh     chan struct{}
-	sourceDelivered    chan struct{}
-	usageHanded        bool
+	event                  realtimev1.PhraseSubtitleEvent
+	result                 translate.Result
+	err                    error
+	done                   bool
+	translationStarted     bool
+	streamed               bool
+	streamPlaybackSequence int64
+	playbackResidualText   string
+	doneCh                 chan struct{}
+	playbackDoneCh         chan struct{}
+	sourceDelivered        chan struct{}
+	usageHanded            bool
 }
 
 func NewPhraseTranslationCoordinator(translator translate.Provider, provider string, observer PhraseSubtitleObserver, now func() time.Time) *PhraseTranslationCoordinator {
@@ -101,6 +114,9 @@ func (c *PhraseTranslationCoordinator) StartPhraseSubtitleTurn(turn TurnContext,
 	}
 	target, _, ok := targetRoute(turn.LanguageConfig, asr.NormalizeLanguage(sourceLanguage))
 	if !ok {
+		slog.Warn("phrase_turn_route_unavailable", "session_id", turn.SessionID, "turn_id", turn.ID,
+			"source_language", sourceLanguage, "normalized_source", asr.NormalizeLanguage(sourceLanguage),
+			"language_pairs", turn.LanguageConfig.LanguagePairs)
 		return
 	}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -117,6 +133,10 @@ func (c *PhraseTranslationCoordinator) StartPhraseSubtitleTurn(turn TurnContext,
 		playback.ResetUtterance(turn.SessionID, turn.ID)
 	}
 	c.mu.Unlock()
+	_, streamProvider := c.translator.(translate.StreamProvider)
+	slog.Info("phrase_turn_ready", "session_id", turn.SessionID, "turn_id", turn.ID,
+		"source_language", asr.NormalizeLanguage(sourceLanguage), "target_language", target,
+		"stream_provider", streamProvider, "translator_type", fmt.Sprintf("%T", c.translator))
 }
 
 func (c *PhraseTranslationCoordinator) BeginPhraseSubtitleFinalFlush(turnID string) {
@@ -161,6 +181,8 @@ func (c *PhraseTranslationCoordinator) ObservePhraseSubtitle(ctx context.Context
 	sourceOnly := utterance.sourceOnly
 	phrase.translationStarted = !sourceOnly
 	c.mu.Unlock()
+	slog.Info("phrase_translation_queued", "session_id", event.SessionID, "turn_id", event.UtteranceID,
+		"phrase_sequence", event.PhraseSequence, "source_text", event.SourceText, "source_only", sourceOnly)
 	go c.publishSourcePhrase(utterance, phrase, ctx, previousSource)
 	if !sourceOnly {
 		go c.translate(utterance, phrase)
@@ -179,16 +201,41 @@ func (c *PhraseTranslationCoordinator) publishSourcePhrase(utterance *phraseTran
 }
 
 func (c *PhraseTranslationCoordinator) translate(utterance *phraseTranslationUtterance, phrase *translatedPhrase) {
-	result, err := c.translator.Translate(utterance.ctx, translate.Request{SessionID: utterance.turn.SessionID, TurnID: utterance.turn.ID, Text: phrase.event.SourceText, SourceLanguage: utterance.source, TargetLanguage: utterance.target})
+	slog.Info("phrase_translation_started", "session_id", utterance.turn.SessionID, "turn_id", utterance.turn.ID,
+		"phrase_sequence", phrase.event.PhraseSequence, "source_text", phrase.event.SourceText)
+	request := translate.Request{SessionID: utterance.turn.SessionID, TurnID: utterance.turn.ID, Text: phrase.event.SourceText, SourceLanguage: utterance.source, TargetLanguage: utterance.target}
+	var result translate.Result
+	var err error
+	_, streamed := c.translator.(translate.StreamProvider)
+	if streaming, ok := c.translator.(translate.StreamProvider); ok {
+		// The phrase stabilizer starts this request while ASR is still active.
+		// Keep streamed deltas provisional until the provider validates the
+		// complete response. Qwen may fall back to a reinforced retry after
+		// detecting a refusal or prompt-injection response; enqueueing deltas
+		// before that decision would speak the rejected response first.
+		result, err = streaming.TranslateStream(utterance.ctx, request, nil)
+	} else {
+		result, err = c.translator.Translate(utterance.ctx, request)
+	}
 	c.mu.Lock()
-	phrase.result, phrase.err, phrase.done = result, err, true
+	phrase.result, phrase.err, phrase.streamed = result, err, streamed
+	c.mu.Unlock()
+	// Playback admission is part of phrase settlement. Signal provider
+	// completion only after the ordered enqueue decision has finished, otherwise
+	// VAD final can detach this utterance in the narrow window between provider
+	// return and enqueue and silently lose its TTS.
+	c.enqueueTranslatedPhrasePlayback(utterance, phrase)
+	c.mu.Lock()
+	phrase.done = true
 	close(phrase.doneCh)
 	lateUsage, usageErr := c.latePhraseUsageLocked(utterance, phrase)
 	c.mu.Unlock()
+	slog.Info("phrase_translation_done", "session_id", utterance.turn.SessionID, "turn_id", utterance.turn.ID,
+		"phrase_sequence", phrase.event.PhraseSequence, "error", err, "translated_runes", len([]rune(result.Text)),
+		"provider", result.Provider, "model", result.Model)
 	if usageErr == nil && lateUsage.ID != "" {
 		c.reportLatePhraseUsage(lateUsage)
 	}
-	c.enqueueTranslatedPhrasePlayback(utterance, phrase)
 	if !c.activePhraseSubtitleTurn(utterance) {
 		return
 	}
@@ -201,6 +248,73 @@ func (c *PhraseTranslationCoordinator) translate(utterance *phraseTranslationUtt
 	events := c.publishReadyLocked(utterance)
 	c.mu.Unlock()
 	c.publishPhraseEvents(utterance, events)
+}
+
+func shouldFlushStreamTTS(text string) bool {
+	if strings.TrimSpace(text) == "" {
+		return false
+	}
+	runes := []rune(text)
+	if isStreamTextBoundary(runes[len(runes)-1]) {
+		return true
+	}
+	// For languages with spaces, wait for a word boundary inside the 20-40
+	// character window. CJK scripts do not require a synthetic separator, so
+	// they can keep the lower-latency 32-character target.
+	if len(runes) >= 20 && unicode.IsSpace(runes[len(runes)-1]) {
+		return true
+	}
+	if len(runes) >= 32 && isUnspacedCJKRune(runes[len(runes)-1]) {
+		return true
+	}
+	return len(runes) >= 40
+}
+
+func splitStreamTTS(text string) []string {
+	var chunks []string
+	var buffer strings.Builder
+	for _, r := range text {
+		buffer.WriteRune(r)
+		if shouldFlushStreamTTS(buffer.String()) {
+			chunks = append(chunks, strings.TrimSpace(buffer.String()))
+			buffer.Reset()
+		}
+	}
+	if tail := strings.TrimSpace(buffer.String()); tail != "" {
+		chunks = append(chunks, tail)
+	}
+	return chunks
+}
+
+func (c *PhraseTranslationCoordinator) enqueueStreamPhrasePlayback(utterance *phraseTranslationUtterance, phrase *translatedPhrase, playback PhrasePlaybackScheduler, text string) {
+	text = strings.TrimSpace(text)
+	if c == nil || utterance == nil || phrase == nil || text == "" {
+		return
+	}
+	phrase.streamPlaybackSequence++
+	sequence := phrase.streamPlaybackSequence
+	if utterance.playbackFailed || playback == nil {
+		utterance.playbackFailed = true
+		phrase.playbackResidualText = joinPhrasePlaybackText(phrase.playbackResidualText, text)
+		return
+	}
+	request := PhrasePlaybackRequest{
+		Turn: utterance.turn, UtteranceID: phrase.event.UtteranceID,
+		PhraseSequence: phrase.event.PhraseSequence*1000 + sequence,
+		PhraseGroup:    phrase.event.PhraseSequence,
+		Language:       utterance.target, Text: text,
+		PlaybackID: fmt.Sprintf("phrase_%s_%d_%d", phrase.event.UtteranceID, phrase.event.PhraseSequence, sequence),
+	}
+	result := enqueuePhrasePlayback(playback, request)
+	if !result.Accepted {
+		utterance.playbackFailed = true
+		phrase.playbackResidualText = joinPhrasePlaybackText(phrase.playbackResidualText, text)
+		slog.Warn("phrase_tts_enqueue_failed", "session_id", utterance.turn.SessionID, "turn_id", utterance.turn.ID,
+			"phrase_sequence", phrase.event.PhraseSequence, "stream_sequence", sequence, "reason", result.Reason)
+		return
+	}
+	slog.Info("phrase_tts_enqueued", "session_id", utterance.turn.SessionID, "turn_id", utterance.turn.ID,
+		"phrase_sequence", phrase.event.PhraseSequence, "stream_sequence", sequence, "text", text)
 }
 
 func (c *PhraseTranslationCoordinator) publishReadyLocked(utterance *phraseTranslationUtterance) []realtimev1.PhraseSubtitleEvent {
@@ -243,29 +357,80 @@ func (c *PhraseTranslationCoordinator) publishPhraseEvents(utterance *phraseTran
 // Translation completion may arrive out of order, so ready phrases are drained
 // under the coordinator lock in sequence order before the final tail is added.
 func (c *PhraseTranslationCoordinator) enqueueTranslatedPhrasePlayback(utterance *phraseTranslationUtterance, phrase *translatedPhrase) {
+	// Admission may apply scheduler back-pressure. Serialize it per utterance so
+	// phrase order is stable without holding the coordinator-wide mutex while a
+	// different session is waiting for playback capacity.
+	utterance.playbackMu.Lock()
+	defer utterance.playbackMu.Unlock()
+
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	if c.utterances[utterance.turn.ID] != utterance {
+		c.mu.Unlock()
 		return
 	}
 	utterance.playbackReady[phrase.event.PhraseSequence] = phrase
+	var readyPhrases []*translatedPhrase
 	for {
 		ready := utterance.playbackReady[utterance.playbackNext]
 		if ready == nil {
-			return
+			break
 		}
-		if c.playback != nil && ready.err == nil && strings.TrimSpace(ready.result.Text) != "" {
-			c.playback.Enqueue(PhrasePlaybackRequest{
+		readyPhrases = append(readyPhrases, ready)
+		delete(utterance.playbackReady, utterance.playbackNext)
+		utterance.playbackNext++
+	}
+	playback := c.playback
+	c.mu.Unlock()
+
+	for _, ready := range readyPhrases {
+		text := strings.TrimSpace(ready.result.Text)
+		if ready.err != nil || text == "" {
+			// A failed translation creates a gap in the spoken prefix. Keep all
+			// later target text behind final residual settlement so it cannot play
+			// out of order before the retry for this source segment.
+			utterance.playbackFailed = true
+		} else if ready.streamed {
+			// Stream deltas remain provisional until provider validation. Split
+			// the validated result here, after earlier phrase sequences have
+			// settled, so concurrently completed phrases cannot reach TTS out of
+			// source order.
+			for _, chunk := range splitStreamTTS(text) {
+				c.enqueueStreamPhrasePlayback(utterance, ready, playback, chunk)
+			}
+		} else if utterance.playbackFailed || playback == nil {
+			utterance.playbackFailed = true
+			ready.playbackResidualText = joinPhrasePlaybackText(ready.playbackResidualText, text)
+		} else {
+			result := enqueuePhrasePlayback(playback, PhrasePlaybackRequest{
 				Turn: utterance.turn, UtteranceID: ready.event.UtteranceID,
 				PhraseSequence: ready.event.PhraseSequence, Language: utterance.target,
 				Text:       ready.result.Text,
 				PlaybackID: fmt.Sprintf("phrase_%s_%d", ready.event.UtteranceID, ready.event.PhraseSequence),
 			})
+			if !result.Accepted {
+				utterance.playbackFailed = true
+				ready.playbackResidualText = joinPhrasePlaybackText(ready.playbackResidualText, text)
+				slog.Warn("phrase_tts_enqueue_failed", "session_id", utterance.turn.SessionID,
+					"turn_id", utterance.turn.ID, "phrase_sequence", ready.event.PhraseSequence,
+					"reason", result.Reason)
+			}
 		}
 		close(ready.playbackDoneCh)
-		delete(utterance.playbackReady, utterance.playbackNext)
-		utterance.playbackNext++
 	}
+}
+
+type phrasePlaybackReasonEnqueuer interface {
+	EnqueueWithReason(PhrasePlaybackRequest) PhrasePlaybackEnqueueResult
+}
+
+func enqueuePhrasePlayback(playback PhrasePlaybackScheduler, request PhrasePlaybackRequest) PhrasePlaybackEnqueueResult {
+	if detailed, ok := playback.(phrasePlaybackReasonEnqueuer); ok {
+		return detailed.EnqueueWithReason(request)
+	}
+	if playback.Enqueue(request) {
+		return PhrasePlaybackEnqueueResult{Accepted: true}
+	}
+	return PhrasePlaybackEnqueueResult{Reason: PhrasePlaybackRejectBacklogLimit}
 }
 
 func (c *PhraseTranslationCoordinator) activePhraseSubtitleTurn(utterance *phraseTranslationUtterance) bool {
@@ -306,17 +471,23 @@ func (c *PhraseTranslationCoordinator) FinalizePhraseSubtitleTurn(ctx context.Co
 		c.mu.Unlock()
 		return PhraseTranslationSummary{}, finalText, nil, false, nil
 	}
-	summary, consumed, fullyReused := phraseSummary(finalText, utterance)
-	if fullyReused {
-		if consumed == len(finalText) {
-			c.detachPhraseSubtitleTurnLocked(turn.ID, false)
-			c.mu.Unlock()
-			return summary, "", nil, true, nil
-		}
-	}
+	// A phrase summary remains useful even when the final ASR text has an
+	// unconfirmed suffix.  The summary contains already translated phrases and
+	// residual markers for failed/unconfirmed source segments; the caller must
+	// translate only those residual segments and must not fall back to the whole
+	// Turn.  The bool therefore means "phrase coverage was established", not
+	// "the summary covers every byte of finalText".
+	summary, consumed, phraseCovered := phraseSummary(finalText, utterance)
 	usage, err := c.detachPhraseSubtitleTurnLocked(turn.ID, false)
 	c.mu.Unlock()
-	return summary, finalText[consumed:], usage, false, err
+	if !phraseCovered {
+		// No stable phrase matched the final source. Return the complete source
+		// to the ordinary final translator; consumed is zero in this case, but
+		// using finalText explicitly keeps the contract clear if phraseSummary
+		// gains another failure path later.
+		return summary, finalText, usage, false, err
+	}
+	return summary, finalText[consumed:], usage, true, err
 }
 
 // HasPendingPhrase reports whether a provider request is already in flight for
@@ -360,8 +531,10 @@ func (c *PhraseTranslationCoordinator) waitForPendingPhrases(ctx context.Context
 			return false
 		}
 	}
-	// Translation completion can race its ordered scheduler enqueue. Wait for
-	// that boundary before appending final-tail audio.
+	// Wait for admission, not audio completion. This closes the provider-return
+	// race where final settlement could detach the utterance immediately before
+	// its translated text entered the scheduler. The scheduler still owns actual
+	// playback asynchronously, so VAD final never waits for clip duration.
 	for _, done := range playbackDone {
 		select {
 		case <-done:
@@ -468,11 +641,23 @@ func (c *PhraseTranslationCoordinator) phraseUsageFact(turn TurnContext, phrase 
 	)
 }
 
-const phraseResidualMarker = "\x00"
+// Use a private-use Unicode rune as the in-memory placeholder. PostgreSQL
+// jsonb rejects NUL even when JSON-escaped, so a leaked marker must never make
+// the otherwise valid FinalTurn impossible to persist.
+const phraseResidualMarker = "\uE000"
+
+// Internal separator used only while passing ordered residual playback from
+// phrase settlement to the scheduler. Provider text cannot contain this
+// control byte under the validated translation contract.
+const phrasePlaybackResidualSeparator = "\x1e"
 
 // phraseSummary builds a final translation template without waiting for phrase
 // workers. Successful phrases are reused; unresolved source segments are replaced
-// by markers and translated once by the final settlement path.
+// by markers and translated once by the final settlement path. The returned
+// bool reports whether at least one stable phrase was structurally matched. It
+// is intentionally true when the match has residual suffix text or failed
+// phrases, because those residuals can still be settled without retranslating
+// the already successful prefix.
 func phraseSummary(finalText string, utterance *phraseTranslationUtterance) (PhraseTranslationSummary, int, bool) {
 	var summary PhraseTranslationSummary
 	cursor := 0
@@ -483,18 +668,29 @@ func phraseSummary(finalText string, utterance *phraseTranslationUtterance) (Phr
 			break
 		}
 		index := strings.Index(finalText[cursor:], phrase.event.SourceText)
-		if index < 0 || strings.TrimSpace(finalText[cursor:cursor+index]) != "" {
+		if index < 0 {
 			return PhraseTranslationSummary{}, 0, false
 		}
-		summary.Text += finalText[cursor : cursor+index]
+		gap := finalText[cursor : cursor+index]
+		if strings.TrimSpace(gap) == "" {
+			summary.Text += gap
+		} else if !isIgnorableConfirmedGap(gap) {
+			return PhraseTranslationSummary{}, 0, false
+		}
 		cursor += index + len(phrase.event.SourceText)
 		if phrase.done && phrase.err == nil && strings.TrimSpace(phrase.result.Text) != "" {
 			summary.Text += phrase.result.Text
+			summary.PlaybackResidualText = joinPhrasePlaybackText(summary.PlaybackResidualText, phrase.playbackResidualText)
+			if residual := strings.TrimSpace(phrase.playbackResidualText); residual != "" {
+				summary.PlaybackResidualSegments = append(summary.PlaybackResidualSegments, residual)
+			}
 			if !mergePhraseUsage(&summary, phrase.result) {
 				return PhraseTranslationSummary{}, 0, false
 			}
 		} else {
 			summary.Text += phraseResidualMarker
+			summary.PlaybackResidualText += phraseResidualMarker
+			summary.PlaybackResidualSegments = append(summary.PlaybackResidualSegments, phraseResidualMarker)
 			summary.ResidualSegments = append(summary.ResidualSegments, phrase.event.SourceText)
 			if phrase.done && hasPhraseUsage(phrase.result) {
 				if !mergePhraseUsage(&summary, phrase.result) {
@@ -508,9 +704,14 @@ func phraseSummary(finalText string, utterance *phraseTranslationUtterance) (Phr
 	if !covered {
 		return summary, cursor, false
 	}
-	if strings.TrimSpace(finalText[cursor:]) != "" {
+	suffix := finalText[cursor:]
+	if isIgnorableConfirmedGap(suffix) {
+		cursor = len(finalText)
+	} else if strings.TrimSpace(suffix) != "" {
 		summary.Text += phraseResidualMarker
-		summary.ResidualSegments = append(summary.ResidualSegments, finalText[cursor:])
+		summary.PlaybackResidualText += phraseResidualMarker
+		summary.PlaybackResidualSegments = append(summary.PlaybackResidualSegments, phraseResidualMarker)
+		summary.ResidualSegments = append(summary.ResidualSegments, suffix)
 	}
 	return summary, cursor, true
 }

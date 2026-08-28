@@ -12,7 +12,7 @@ Lingow 是面向 Web、移动端和硬件设备的 AI 语音助手与面对面�
 ## 核心能力
 
 - 助手模式：客户端唤醒词检测、自然语言语义命令、助手问答与模式切换。
-- 同传模式：双语配置、自动语言识别、流式 ASR、翻译、句末 TTS 和抢话打断。
+- 同传模式：双语配置、自动语言识别、流式 ASR、翻译、短块 TTS 和抢话打断。
 - 实时链路：WebRTC 音频、可靠有序 DataChannel、运行状态与模式快照、弱网重连边界。
 - 记录与归属：Final Turn 持久化、临时说话人、后续归属修正和历史查询。
 - 账户与设备：匿名/注册账户、短期访问令牌、Ed25519 设备配对与受限设备会话。
@@ -56,7 +56,7 @@ Web / Mobile / Device
 
 ## 本地启动
 
-建议准备 Go 1.26、Node.js 22、npm，以及 PostgreSQL 16 和 Redis/Valkey 7。需要容器化依赖时安装
+建议准备 Go 1.26.7、Node.js 22、npm，以及 PostgreSQL 16 和 Redis/Valkey 7。需要容器化依赖时安装
 Docker Desktop。
 
 1. 复制根配置并填写本地凭证：
@@ -149,6 +149,16 @@ npm run typecheck
 npm test
 npm run build
 ```
+
+真实服务系统 E2E（CI 工作流会自动准备 PostgreSQL、Redis、API、realtime-audio 和 Web）：
+
+```bash
+cd apps/web
+npm run test:e2e:system
+```
+
+本地执行前需先启动 API 和 realtime-audio，并设置 `LINGOW_SESSION_RUNTIME=enabled`、
+`REALTIME_API_DATABASE=enabled` 及对应数据库/Redis 配置。
 
 Mobile 控制核心：
 
